@@ -1,0 +1,1 @@
+joint_limits.yaml은 root/ros2_ws/src/open_manipulator/open_manipulator_moveit_config/config/omx_f 에
