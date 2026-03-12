@@ -1,0 +1,15 @@
+# Request
+geometry_msgs/PoseStamped target_pose
+
+# 0: IK only (return joint_state only)
+# 1: MoveIt plan+execute
+# 2: Direct controller (FollowJointTrajectory) - no planning
+uint8 execute_mode
+
+float64 ik_timeout_sec     # e.g. 0.2 ~ 1.0
+float64 move_duration_sec  # used only for execute_mode=2 (e.g. 2.0)
+---
+# Response
+bool success
+string message
+sensor_msgs/JointState joint_state
