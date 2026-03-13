@@ -180,11 +180,6 @@ private:
         continue;
       }
 
-      if (recv_id != client_id_) {
-        RCLCPP_WARN(this->get_logger(), "ID mismatch. recv_id=%s, client_id=%s", recv_id.c_str(), client_id_.c_str());
-        continue;
-      }
-
       if (payload.find('@') != std::string::npos) {
         std::vector<std::string> cmd_tokens = splitString(payload, '@');
 
