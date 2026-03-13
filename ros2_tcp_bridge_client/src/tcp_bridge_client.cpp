@@ -303,12 +303,15 @@ private:
   {
     std::array<double, 5> joint_deg{};
 
+    // 대기
     if (move_index == 0) {
       joint_deg = {45.0, -100.0, 60.0, 30.0, 0.0};
     } 
+    // 요리중
     else if (move_index == 1) {
-      joint_deg = {0.0, -100.0, 60.0, 30.0, 0.0};
+      joint_deg = {0.0, -30.0, -20.0, 60.0, 0.0};
     } 
+    // 화구
     else if (move_index == 2) {
       joint_deg = {90.0, 0.0, -45.0, 60.0, 0.0};
     } 
