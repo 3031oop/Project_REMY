@@ -30,7 +30,7 @@ public:
   {
     server_ip_ = this->declare_parameter<std::string>("server_ip", "127.0.0.1");
     server_port_ = this->declare_parameter<int>("server_port", 5000);
-    client_id_ = this->declare_parameter<std::string>("client_id", "BRIDGE2");
+    client_id_ = this->declare_parameter<std::string>("client_id", "OMXA");
     password_ = this->declare_parameter<std::string>("password", "PASSWD");
     arduino_id_ = this->declare_parameter<std::string>("arduino_id", "ARD");
     reconnect_period_ms_ = this->declare_parameter<int>("reconnect_period_ms", 2000);
@@ -309,13 +309,13 @@ private:
     std::array<double, 5> joint_deg{};
 
     if (move_index == 0) {
-      joint_deg = {45.0, -110.0, 65.0, 45.0, 0.0};
+      joint_deg = {45.0, -100.0, 60.0, 30.0, 0.0};
     } 
     else if (move_index == 1) {
-      joint_deg = {0.0, -110.0, 65.0, 45.0, 0.0};
+      joint_deg = {0.0, -100.0, 60.0, 30.0, 0.0};
     } 
     else if (move_index == 2) {
-      joint_deg = {90.0, -110.0, 65.0, 45.0, 0.0};
+      joint_deg = {90.0, 0.0, -45.0, 60.0, 0.0};
     } 
     else {
       RCLCPP_WARN(this->get_logger(), "Unknown MOVE index: %d", move_index);
