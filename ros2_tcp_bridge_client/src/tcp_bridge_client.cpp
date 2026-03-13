@@ -32,7 +32,7 @@ public:
     server_port_ = this->declare_parameter<int>("server_port", 5000);
     client_id_ = this->declare_parameter<std::string>("client_id", "OMXA");
     password_ = this->declare_parameter<std::string>("password", "PASSWD");
-    arduino_id_ = this->declare_parameter<std::string>("arduino_id", "ARD");
+    target_id_ = this->declare_parameter<std::string>("target_id", "ARD");
     reconnect_period_ms_ = this->declare_parameter<int>("reconnect_period_ms", 2000);
 
     target_pose_pub_ = this->create_publisher<std_msgs::msg::Float32MultiArray>("/target_pose", 10);
@@ -62,7 +62,7 @@ public:
 private:
   void omxCallback(const std_msgs::msg::String::SharedPtr msg)
   {
-    const std::string wire_msg = "[" + arduino_id_ + "]" + msg->data;
+    const std::string wire_msg = "[" + target_id_ + "]" + msg->data;
 
     if (!connected_) {
       return;
@@ -347,7 +347,7 @@ private:
   int server_port_;
   std::string client_id_;
   std::string password_;
-  std::string arduino_id_;
+  std::string target_id_;
   std::string default_target_;
   int reconnect_period_ms_;
 
