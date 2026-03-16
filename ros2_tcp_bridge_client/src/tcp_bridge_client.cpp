@@ -30,9 +30,9 @@ public:
   {
     server_ip_ = this->declare_parameter<std::string>("server_ip", "127.0.0.1");
     server_port_ = this->declare_parameter<int>("server_port", 5000);
-    client_id_ = this->declare_parameter<std::string>("client_id", "BRIDGE2");
+    client_id_ = this->declare_parameter<std::string>("client_id", "OMXA");
     password_ = this->declare_parameter<std::string>("password", "PASSWD");
-    arduino_id_ = this->declare_parameter<std::string>("arduino_id", "ARD");
+    target_id_ = this->declare_parameter<std::string>("target_id", "ARD");
     reconnect_period_ms_ = this->declare_parameter<int>("reconnect_period_ms", 2000);
 
     target_pose_pub_ = this->create_publisher<std_msgs::msg::Float32MultiArray>("/target_pose", 10);
@@ -62,7 +62,7 @@ public:
 private:
   void omxCallback(const std_msgs::msg::String::SharedPtr msg)
   {
-    const std::string wire_msg = "[" + arduino_id_ + "]" + msg->data;
+    const std::string wire_msg = "[" + target_id_ + "]" + msg->data;
 
     if (!connected_) {
       return;
@@ -177,11 +177,6 @@ private:
 
       if (payload.empty()) {
         RCLCPP_WARN(this->get_logger(), "Empty payload: %s", raw_msg.c_str());
-        continue;
-      }
-
-      if (recv_id != client_id_) {
-        RCLCPP_WARN(this->get_logger(), "ID mismatch. recv_id=%s, client_id=%s", recv_id.c_str(), client_id_.c_str());
         continue;
       }
 
@@ -308,14 +303,17 @@ private:
   {
     std::array<double, 5> joint_deg{};
 
+    // 대기
     if (move_index == 0) {
-      joint_deg = {45.0, -110.0, 65.0, 45.0, 0.0};
+      joint_deg = {45.0, -100.0, 60.0, 30.0, 0.0};
     } 
+    // 요리중
     else if (move_index == 1) {
-      joint_deg = {0.0, -110.0, 65.0, 45.0, 0.0};
+      joint_deg = {0.0, -30.0, -20.0, 60.0, 0.0};
     } 
+    // 화구
     else if (move_index == 2) {
-      joint_deg = {90.0, -110.0, 65.0, 45.0, 0.0};
+      joint_deg = {90.0, 0.0, -45.0, 60.0, 0.0};
     } 
     else {
       RCLCPP_WARN(this->get_logger(), "Unknown MOVE index: %d", move_index);
@@ -347,7 +345,7 @@ private:
   int server_port_;
   std::string client_id_;
   std::string password_;
-  std::string arduino_id_;
+  std::string target_id_;
   std::string default_target_;
   int reconnect_period_ms_;
 
