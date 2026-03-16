@@ -21,7 +21,7 @@ class FallingObjectSmartReturn(Node):
     def __init__(self):
         super().__init__('yolo_state_node')
         # 1) YOLO Model Setup
-        model_path = Path('/home/remi/kitchen/kitchen_ncnn_model')
+        model_path = Path('/home/remi/kitchen/kitchen_ncnn_model2')
         self.model = YOLO(str(model_path), task='detect')
         self.bridge = CvBridge()
 
@@ -55,6 +55,7 @@ class FallingObjectSmartReturn(Node):
 
         # 3) State & Detection Variables
         self.state = 'IDLE'
+        self.prev_sent_state = None
         self.current_odom = None
         self.latest_target = None  # Shared detection result
         self.lock = threading.Lock()
@@ -67,24 +68,31 @@ class FallingObjectSmartReturn(Node):
         self.prev_dist = 0.0
         self.target_dist = 0.0
         self.sound_count = 0
+        self.last_error = 0
+
+        #Patrol variables
+        self.patrol_sub_state = 'MOVE'
+        self.patrol_start_pose = None
+        self.patrol_start_yaw = 0.0
+        self.rotate_end_time = 0.0
+        self.found_during_patrol = False
+        
+
 
         # 4) ROS Pub/Sub
         self.cmd_vel_pub = self.create_publisher(TwistStamped, '/cmd_vel', 10)
         #self.sound_pub = self.create_publisher(Sound, '/sound', 10)
         self.image_out_pub = self.create_publisher(Image, '/image_out', 10)
-        self.odom_sub = self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
-        self.sound_client = self.create_client(SoundSrv, '/sound')
-
-
         self.command_pub = self.create_publisher(String, '/waffle_command', 10)
+        
+        self.odom_sub = self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
         self.command_sub = self.create_subscription(String, '/waffle_command', self.command_callback, 10)
-
+        self.sound_client = self.create_client(SoundSrv, '/sound')
 
 
         # 5) Start Threads & Timers
         self.inference_thread = threading.Thread(target=self.inference_loop, daemon=True)
         self.inference_thread.start()
-        
         self.timer = self.create_timer(0.1, self.main_control_loop) # 10Hz Control
 
 
@@ -96,23 +104,33 @@ class FallingObjectSmartReturn(Node):
         command = msg.data.lower().strip()
         self.get_logger().info(f"Received command: {command}")
 
+        #filltering
+        if command in ['patrol', 'detect', 'depart', 'wait_return', 'force_return', 'return']:
+            return
+
+
         if command == 'start':
             if self.state == 'IDLE':
-                self.get_logger().info("Remote START: Beginning detection...")
-                self.state = 'DETECT'
+                self.get_logger().info("Remote START(PATROL): Beginning detection...")
+                self.state = 'PATROL'
+                self.patrol_sub_state = 'MOVE'
+                self.patrol_start_pose = None
+                self.rotate_end_time = 0.0
+                self.stop_count = 0
             else:
                 self.get_logger().warn(f"Ignored 'start': Robot is already in {self.state}")
 
-        elif command == 'return':
+        #elif command == 'return':
+        if command == 'return':
                 self.get_logger().info("Remote RETURN: Stopping current task and going home.")
                 self.send_control(0.0, 0.0)
                 self.state = 'RETURN'
 
-        elif command == 'force_return':
-            self.get_logger().info("Remote FORCE_RETURN: Emergency return initiated!")
-            self.send_control(0.0, 0.0)
-            self.sound_count = 0
-            self.state = 'RETURN'
+        #elif command == 'force_return':
+        #    self.get_logger().info("Remote FORCE_RETURN: Emergency return initiated!")
+        #    self.send_control(0.0, 0.0)
+        #    self.sound_count = 0
+        #    self.state = 'RETURN'
 
     #logic function
     def get_yaw_from_quaternion(self, q):
@@ -127,12 +145,13 @@ class FallingObjectSmartReturn(Node):
     # --- Background Inference Thread ---
     def inference_loop(self):
         """Background thread for YOLO inference to keep high FPS."""
-        time.sleep(2.0)
+        time.sleep(3.0)
 
         while rclpy.ok():
             try:
-                frames = self.pipeline.wait_for_frames()
-                
+                frames = self.pipeline.wait_for_frames(timeout_ms=5000)
+                if not frames: continue
+
                 aligned_frames = self.align.process(frames)
                 depth_frame = aligned_frames.get_depth_frame()
                 color_frame = aligned_frames.get_color_frame()
@@ -153,7 +172,7 @@ class FallingObjectSmartReturn(Node):
                 #current_det = {'cx': None, 'dist': 0.0, 'img': color_image.copy()}
 
                 # YOLO Predict
-                results = self.model.predict(source=color_image, conf=0.3, imgsz=320, device='cpu',half=False, verbose=False)
+                results = self.model.predict(source=color_image, conf=0.6, imgsz=320, device='cpu',half=False, verbose=False)
                 
                 best_det = None
                 if results and len(results[0].boxes) > 0:
@@ -199,7 +218,52 @@ class FallingObjectSmartReturn(Node):
         if self.state == 'IDLE':
             self.start_pose = self.get_current_xy()
             self.start_orientation = self.get_yaw_from_quaternion(self.current_odom.pose.pose.orientation)
-            #self.state = 'DETECT'
+            #self.state = 'PATROL'
+
+        elif self.state == 'PATROL':
+            #PATROL msg publish
+            #status_msg = String()
+            #status_msg.data = "patrol"
+            #self.command_pub.publish(status_msg)
+            #self.get_logger().info("Published: patrol")
+            self.publish_msgs("patrol");
+
+
+            if target['cx'] is not None:
+                error = (self.width / 2) - target['cx']
+                
+                if abs(error) > 50:
+                    slow_down_speed = max(0.12, abs(error) * 0.001) 
+                    self.send_control(0.0, slow_down_speed if error > 0 else -slow_down_speed)
+                    self.get_logger().info("Target spotted! Slowing down and centering...")
+                else:
+                    self.send_control(0.0, 0.0)
+                    self.state = 'DETECT'
+                return
+
+            cur_x, cur_y = self.get_current_xy()
+
+            if self.patrol_sub_state == 'MOVE':
+                if self.patrol_start_pose is None:
+                    self.patrol_start_pose = (cur_x, cur_y)
+                
+                dist = math.sqrt((cur_x - self.patrol_start_pose[0])**2 + (cur_y - self.patrol_start_pose[1])**2)
+                if dist < 1.0:
+                    self.send_control(0.07, 0.0)
+                else:
+                    self.send_control(0.0, 0.0)
+                    self.patrol_sub_state = 'ROTATE'
+                    #self.rotate_end_time = time.time() + 12.6 # 0.5rad/s -> 1cycle time 12.6
+                    self.rotate_end_time = time.time() + 21.0 # 0.5rad/s -> 1cycle time 12.6
+
+            elif self.patrol_sub_state == 'ROTATE':
+                remaining = self.rotate_end_time - time.time()
+                if remaining > 0:
+                    self.send_control(0.0, 0.3)
+                else:
+                    self.send_control(0.0, 0.0)
+                    self.get_logger().warn("Patrol finished without detection. Returning home.")
+                    self.state = 'RETURN'
 
         elif self.state == 'DETECT':
             if target['cx'] is not None:
@@ -213,10 +277,11 @@ class FallingObjectSmartReturn(Node):
                 if self.stop_count > 5:
 
                     #detect msg publish
-                    status_msg = String()
-                    status_msg.data = "detect"
-                    self.command_pub.publish(status_msg)
-                    self.get_logger().info("Published: detect")
+                    #status_msg = String()
+                    #status_msg.data = "detect"
+                    #self.command_pub.publish(status_msg)
+                    #self.get_logger().info("Published: detect")
+                    self.publish_msgs("detect");
 
                     #rotate ready logic
                     #85.2 -> 1.487rad
@@ -237,6 +302,7 @@ class FallingObjectSmartReturn(Node):
         #        self.move_start_pose = self.get_current_xy()
         #        self.sound_count = 50
         #        self.state = 'MOVING'
+
         elif self.state == 'ROTATE':
             if target['cx'] is not None:
                 error = (self.width / 2) - target['cx']
@@ -244,7 +310,6 @@ class FallingObjectSmartReturn(Node):
 
                 if abs(error) > 30:
                     angular_z = error * 0.0008
-                    
 
                     min_speed = 0.12
                     if abs(angular_z) < min_speed:
@@ -287,24 +352,58 @@ class FallingObjectSmartReturn(Node):
                 self.wait_start_time = time.time()
                 
                 #depart msg publish
-                status_msg = String()
-                status_msg.data = "depart"
-                self.command_pub.publish(status_msg)
-                self.get_logger().info("Published: depart")
-
+                #status_msg = String()
+                #status_msg.data = "depart"
+                #self.command_pub.publish(status_msg)
+                #self.get_logger().info("Published: depart")
+                self.publish_msgs("depart");
                 self.state = 'WAIT'
 
         elif self.state == 'WAIT':
-            if time.time() - self.wait_start_time > 2.0:
+            self.publish_msgs(self, "wait_return");
+
+            if time.time() - self.wait_start_time > 5.0:
+                #force_return
+                self.publish_msgs("force_return");
                 self.state = 'RETURN'
 
+        #elif self.state == 'RETURN':
+        #    cur_x, cur_y = self.get_current_xy()
+        #    remain = math.sqrt((self.start_pose[0] - cur_x)**2 + (self.start_pose[1] - cur_y)**2)
+        #    if remain > 0.05:
+        #        self.send_control(-0.1, 0.0)
+        #    else:
+        #        self.state = 'ALIGN_FINAL'
+
         elif self.state == 'RETURN':
+
+            #status_msg = String()
+            #status_msg.data = "return"
+            #self.command_pub.publish(status_msg)
+            #self.get_logger().info("Published: return")
+            self.publish_msgs("return");
+
             cur_x, cur_y = self.get_current_xy()
-            remain = math.sqrt((self.start_pose[0] - cur_x)**2 + (self.start_pose[1] - cur_y)**2)
-            if remain > 0.05:
-                self.send_control(-0.1, 0.0)
+            cur_yaw = self.get_yaw_from_quaternion(self.current_odom.pose.pose.orientation)
+
+            dx = self.start_pose[0] - cur_x
+            dy = self.start_pose[1] - cur_y
+            dist_to_home = math.sqrt(dx**2 + dy**2)
+            angle_to_home = math.atan2(dy, dx)
+
+            angle_diff = (angle_to_home - cur_yaw + math.pi) % (2 * math.pi) - math.pi
+
+            if dist_to_home > 0.05:
+                if abs(angle_diff) > 0.2:
+                    self.get_logger().info("Returning: Aligning to home direction...")
+                    self.send_control(0.0, 0.3 if angle_diff > 0 else -0.4)
+                else:
+                    self.get_logger().info(f"Returning: Moving forward... {dist_to_home:.2f}m left")
+                    self.send_control(0.15, 0.0)
             else:
+                self.send_control(0.0, 0.0)
                 self.state = 'ALIGN_FINAL'
+
 
         elif self.state == 'ALIGN_FINAL':
             cur_yaw = self.get_yaw_from_quaternion(self.current_odom.pose.pose.orientation)
@@ -313,13 +412,15 @@ class FallingObjectSmartReturn(Node):
                 self.send_control(0.0, 0.3 if diff > 0 else -0.3)
             else:
                 self.send_control(0.0, 0.0)
+                self.get_logger().info(f"ALIGN_FINAL: GO TO IDLE")
                 self.state = 'IDLE'
+                self.prev_sent_state = None
 
         # --- UI Overlay ---
-        cv2.putText(display_image, f"STATE: {self.state}", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
-        if target:
-            cv2.putText(display_image, f"DIST: {target['dist']:.2f}m", (20, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        
+        #cv2.putText(display_image, f"STATE: {self.state}", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
+        #if target:
+        #    cv2.putText(display_image, f"DIST: {target['dist']:.2f}m", (20, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        #
         self.image_out_pub.publish(self.bridge.cv2_to_imgmsg(display_image, encoding='bgr8'))
 
     #def trigger_sound(self):
@@ -333,6 +434,14 @@ class FallingObjectSmartReturn(Node):
         msg.twist.linear.x = float(linear)
         msg.twist.angular.z = float(angular)
         self.cmd_vel_pub.publish(msg)
+
+    def publish_msgs(self, status):
+        if self.prev_sent_state != status:
+            msg = String()
+            msg.data = status
+            self.command_pub.publish(msg)
+            self.get_logger().info(f"Published Msgs: {status}")
+            self.prev_sent_state = status
 
 def main():
     rclpy.init()
