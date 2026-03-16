@@ -1,0 +1,9 @@
+./iot_server 5000
+./iot_client 10.10.141.XX 5000 ID:PW
+
+좌표는 ','로 파싱 ex) [REMY_LR]100,50,50 -> X:100, Y:50, Z:50
+명령어는 '@'로 파싱 ex) [REMY_LR]@STOP -> 멈춤
+
+* 명령어 * 
+- STOP : 멈춤
+- ORIGIN : 원점복귀
