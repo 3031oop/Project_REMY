@@ -28,7 +28,7 @@ public:
     // 1) parameter setup
     server_ip_ = this->declare_parameter<std::string>("server_ip", "10.10.141.50");
     server_port_ = this->declare_parameter<int>("server_port", 5000);
-    client_id_ = this->declare_parameter<std::string>("client_id", "HSJ_WF");
+    client_id_ = this->declare_parameter<std::string>("client_id", "WA");
     password_ = this->declare_parameter<std::string>("password", "PASSWD");
     reconnect_period_ms_ = this->declare_parameter<int>("reconnect_period_ms", 2000);
 
@@ -100,7 +100,7 @@ private:
     }
 
     // 현재 서버 형식 호환: [ALLMSG]status
-    std::string wire_msg = "[ALLMSG]" + status + "\n";
+    std::string wire_msg = "[VOI]" + status + "\n";
 
     std::lock_guard<std::mutex> lock(socket_mutex_);
     if (sock_fd_ >= 0) {
