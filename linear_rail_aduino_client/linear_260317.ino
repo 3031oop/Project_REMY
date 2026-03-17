@@ -13,6 +13,7 @@
 
 #include <HCMotor.h>
 #include <SoftwareSerial.h>
+#include <math.h>
 
 #define DIR_PIN 8 
 #define CLK_PIN 9 
@@ -28,6 +29,10 @@ float currentX = 0;
 float targetX = 0, targetY = 0, targetZ = 0;
 float residualX = 0;
 bool isMoving = false;
+
+// ===== 좌표 변환 보정 파라미터 (환경에 맞게 수정) 260317 =====
+const float THETA_DEG = 10.0;     // 카메라 기울기 각도
+const float T_BA[3] = {0.0, 0.0, 0.0}; // 레일 원점에서 본 카메라 원점 오프셋 {tx, ty, tz}
 
 // 레일 물리 설정
 const float LIMIT_TO_LIMIT = 308.0;   // 리미트 스위치 간 실제 거리
@@ -45,6 +50,8 @@ void updateMotorDrive();
 void stopMotor();
 void parseValues(String data);
 void sendCompleteMessage();
+// 함수 추가 (OMX 좌표계 변환)
+void A_to_B(const float pA[3], float theta_deg, const float tBA[3], float pB[3]);
 
 void setup() {
   Serial.begin(9600);
@@ -175,19 +182,53 @@ void homing() {
   Serial.println("Homing Done.");
 }
 
-void parseValues(String data) {
-  int firstComma = data.indexOf(',');
-  if (firstComma > 0) {
-    float requestedX = data.substring(0, firstComma).toFloat();
-    
-    // [수정] 미리 자르지 않고 사용자가 원하는 값을 그대로 목표로 설정
-    targetX = requestedX; 
-    
-    // 아직 움직이지 않았으므로 residualX는 일단 0으로 초기화
-    residualX = 0; 
+// ===== 좌표 변환 함수 (카메라 좌표 pA -> 레일 좌표 pB) =====
+void A_to_B(const float pA[3], float theta_deg, const float tBA[3], float pB[3]) {
+  float theta = theta_deg * PI / 180.0;
 
+  float xA = pA[0];
+  float yA = pA[1];
+  float zA = pA[2];
+
+  float tx = tBA[0];
+  float ty = tBA[1];
+  float tz = tBA[2];
+
+  // 계산 공식 적용
+  pB[0] = -xA + tx;
+
+  // yB = yA * sin(theta) - zA * cos(theta)
+  pB[1] = (yA * sin(theta)) - (zA * cos(theta)) + ty;
+
+  // zB = -yA * cos(theta) - zA * sin(theta)
+  pB[2] = (-yA * cos(theta)) - (zA * sin(theta)) + tz;
+}
+
+void parseValues(String data) {
+  float pA[3] = {0, 0, 0};
+  float pB[3] = {0, 0, 0};
+
+  int firstComma = data.indexOf(',');
+  int secondComma = data.indexOf(',', firstComma + 1);
+  
+  if (firstComma > 0 && secondComma > firstComma) {
+    pA[0] = data.substring(0, firstComma).toFloat();            // 입력받은 X
+    pA[1] = data.substring(firstComma + 1, secondComma).toFloat(); // 입력받은 Y
+    pA[2] = data.substring(secondComma + 1).toFloat();          // 입력받은 Z
+
+    // 좌표 보정 실행
+    A_to_B(pA, THETA_DEG, T_BA, pB);
+
+    // 보정된 pB[0] 값을 레일의 목표 X축으로 설정
+    targetX = constrain(pB[1], 0, MAX_RAIL_LENGTH);
+    targetY = pB[0]; // 추후 Y, Z 제어 모터 추가 시 사용
+    targetZ = pB[2];
+
+    residualX = 0; 
     isMoving = true;
-    Serial.print("Target set to: "); Serial.println(targetX);
+
+    Serial.print("Raw Y: "); Serial.print(pA[1]);
+    Serial.print(" -> Transformed Target Y: "); Serial.println(targetY);
   }
 }
 
