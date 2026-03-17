@@ -550,3 +550,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"[최상위 에러] {e}")
         input("엔터 누르면 종료")
+ 
