@@ -9,7 +9,7 @@ import sys
 
 # 하드웨어 설정
 LED_PINS = [2,3,4,14,15,18,17,27,22]
-VIB_PINS = [24,10,9,25,11,8,7,5] # 진동 추가 260317 성균 수정
+VIB_PINS = [5,9,8,10,25,24,7,23,11] # 진동 추가 260317 성균 수정
 BUTTON_PIN = 21
 
 # 소켓 설정 (전역변수로 옮김 260317 성균수정)
@@ -131,7 +131,7 @@ try:
 		time.sleep(0.1)
   
 except Exception as e:
-    print(f"Error: {e}")
+	print(f"Error: {e}")
 	print('%s:%s'%ADDR)
 	
 finally:
