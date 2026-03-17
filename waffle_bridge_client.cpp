@@ -21,11 +21,20 @@ public:
   WaffleBridgeClient() : Node("waffle_bridge_client"), sock_fd_(-1), connected_(false), stop_recv_(false)
   {
     // 1. parameter setup
-    server_ip_ = this->declare_parameter<std::string>("server_ip", "127.0.0.1");
+    server_ip_ = this->declare_parameter<std::string>("server_ip", "10.10.141.50");
     server_port_ = this->declare_parameter<int>("server_port", 5000);
 	client_id_ = this->declare_parameter<std::string>("client_id", "HSJ_WF");
 	password_ = this->declare_parameter<std::string>("password", "PASSWD");
     reconnect_period_ms_ = this->declare_parameter<int>("reconnect_period_ms", 2000);
+
+	server_ip_ = this->get_parameter("server_ip").as_string();
+    server_port_ = this->get_parameter("server_port").as_int();
+    client_id_ = this->get_parameter("client_id").as_string();
+    password_ = this->get_parameter("password").as_string();
+    reconnect_period_ms_ = this->get_parameter("reconnect_period_ms").as_int();
+
+	RCLCPP_INFO(this->get_logger(), "Connecting to %s:%d (ID: %s, PW: %s)", 
+                server_ip_.c_str(), server_port_, client_id_.c_str(), password_.c_str());
 
     // 2. ROS 2 Publisher & Subscription
     wf_command_pub_ = this->create_publisher<std_msgs::msg::String>("/waffle_command", 10);
@@ -129,33 +138,75 @@ private:
       received_raw.erase(0, received_raw.find_first_not_of(" \n\r\t"));
       received_raw.erase(received_raw.find_last_not_of(" \n\r\t") + 1);
 
-      if (!received_raw.empty()) {
-        auto msg = std_msgs::msg::String();
+      //if (!received_raw.empty()) {
+      //  auto msg = std_msgs::msg::String();
 
-        //  "tts1"server message ->  "start" 
-        if (received_raw == "tts1") {
-          msg.data = "start";
-          RCLCPP_INFO(this->get_logger(), "server 'tts1' -> 'start' pub");
-        }
-		else if (received_raw == "tts2"){
-			msg.data = "return";
-			RCLCPP_INFO(this->get_logger(), "server 'tts2' -> 'return' pub");
-		}
-		else if(received_raw == "tts3"){
-			msg.data = "force_return";
-			RCLCPP_INFO(this->get_logger(), "server 'tts2' -> 'force_return' pub");
-        }
-		//else {
-		//	msg.data = received_raw;
-		//}
+      //  //  "tts1"server message ->  "start" 
+      //  if (received_raw == "tts1") {
+      //    msg.data = "start";
+      //    RCLCPP_INFO(this->get_logger(), "server 'tts1' -> 'start' pub");
+      //  }
+	  //  else if (received_raw == "tts2"){
+	  //  	msg.data = "return";
+	  //  	RCLCPP_INFO(this->get_logger(), "server 'tts2' -> 'return' pub");
+	  //  	}
+	  //  //else if(received_raw == "tts3"){
+	  //  //	msg.data = "force_return";
+	  //  //	RCLCPP_INFO(this->get_logger(), "server 'tts2' -> 'force_return' pub");
+      //  //}
+	  //  else {
+	  //  	msg.data = received_raw;
+	  //  }
 
-		if(!msg.data.empty()){
-        	wf_command_pub_->publish(msg);
-			RCLCPP_INFO(this->get_logger(), "cmd published!! : %s", msg.data.c_str());
-		}
-      }
-    }
-  }
+	  //  if(!msg.data.empty()){
+      //  	wf_command_pub_->publish(msg);
+	  //  	RCLCPP_INFO(this->get_logger(), "cmd published!! : %s", msg.data.c_str());
+	  //  }
+      //}
+		if (!received_raw.empty()) {
+		    size_t open_bracket = received_raw.find('[');
+		    size_t close_bracket = received_raw.find(']');
+		
+    		auto msg = std_msgs::msg::String();
+
+		    if (open_bracket != std::string::npos && close_bracket != std::string::npos) {
+		        std::string sender_id = received_raw.substr(open_bracket + 1, close_bracket - open_bracket - 1);
+		        std::string pure_cmd = received_raw.substr(close_bracket + 1);
+		
+		        if (sender_id == "HSJ_AND" || sender_id == "ADMIN") {
+		            if (pure_cmd == "tts1") {
+		                msg.data = "start";
+		                RCLCPP_INFO(this->get_logger(), "HSJ_WF(%s) command!", sender_id.c_str());
+		            }
+					else if (pure_cmd == "tts2") {
+		                msg.data = "return";
+		                RCLCPP_INFO(this->get_logger(), "HSJ_WF(%s) command!", sender_id.c_str());
+		            }
+					else if(pure_cmd == "tts3"){
+						msg.data = "force_return";
+						RCLCPP_INFO(this->get_logger(), "server 'tts2' -> 'force_return' pub");
+					}
+					else {
+						msg.data = pure_cmd;
+					}
+		            
+ 					if (!msg.data.empty()) {
+ 						wf_command_pub_->publish(msg);
+ 						RCLCPP_INFO(this->get_logger(), "Published: %s", msg.data.c_str());
+ 					}
+
+ 					} else {
+ 						RCLCPP_WARN(this->get_logger(), "Unauthorized sender (%s) - IGNORED", sender_id.c_str());
+ 						continue;
+ 						}
+ 					} else {
+						//not []
+ 						msg.data = received_raw;
+ 						wf_command_pub_->publish(msg);
+ 					}
+ 				}
+ 			}
+ 		}
 
   void closeSocket() { std::lock_guard<std::mutex> lock(socket_mutex_); closeSocketUnlocked(); }
   void closeSocketUnlocked() { if (sock_fd_ >= 0) { ::close(sock_fd_); sock_fd_ = -1; } }
