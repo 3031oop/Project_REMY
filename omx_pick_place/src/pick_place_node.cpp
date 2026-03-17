@@ -124,9 +124,14 @@ private:
       return;
     }
 
+    // data (mm)
     const double x = static_cast<double>(msg->data[0]);
     const double y = static_cast<double>(msg->data[1]);
     const double z = static_cast<double>(msg->data[2]);
+    // mm -> m
+    x *= 0.001;
+    y *= 0.001;
+    z *= 0.001;
 
     this->set_parameter(rclcpp::Parameter("pick.position", std::vector<double>{x, y, z}));
 
