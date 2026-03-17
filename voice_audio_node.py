@@ -25,7 +25,7 @@ CLIENT_ID = "VOI"
 PASSWORD = "PASSWD"
 
 # 현재 팀 구조 호환용 ID
-WA_TARGET_ID = "HSJ_WF"        # 터틀봇 브리지 ID
+WA_TARGET_ID = "WA"        # 터틀봇 브리지 ID
 MAIN_TARGET_ID = "OMXA"        # 상위 판단/브리지 쪽 ID (필요시 EYE/OMXA로 조정)
 
 
@@ -50,10 +50,10 @@ AUDIO_DIR = Path(r"C:\Users\KCCISTC\Desktop\finalproject_sound_voice\final_TTS")
 # 오디오 우선순위
 # =========================
 PRIORITY_MAP = {
-    "CRITICAL": 3,
-    "HIGH": 2,
-    "MEDIUM": 1,
     "LOW": 0,
+    "MEDIUM": 1,
+    "HIGH": 2,
+    "CRITICAL": 3,
 }
 
 
