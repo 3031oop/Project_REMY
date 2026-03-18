@@ -1,3 +1,9 @@
+/* 
+
+명령어 @FIRE@ON, @FIRE@OFF
+
+*/
+
 #include <SoftwareSerial.h>
 
 SoftwareSerial BT(10, 11); // TX, RX
