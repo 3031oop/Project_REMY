@@ -2,6 +2,7 @@
 
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
+#include <std_msgs/msg/bool.hpp>
 
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
@@ -9,6 +10,9 @@
 
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <moveit/robot_state/robot_state.h>
+
+#include <atomic>
+#include <mutex>
 
 // 네 srv 패키지/이름에 맞게 include 경로가 달라짐
 #include "omx_pick_place/srv/pose_to_joint_execute.hpp"
@@ -102,6 +106,39 @@ private:
         std::lock_guard<std::mutex> lk(js_mutex_);
         last_js_ = *msg;
       });
+    estop_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+      "/emergency_stop", 10,
+      [this](const std_msgs::msg::Bool::SharedPtr msg){
+        if (msg->data) {
+          estop_requested_.store(true);
+
+          try {
+            if (move_group_) {
+              move_group_->stop();
+            }
+          } catch(...){}
+
+          GoalHandleFJT::SharedPtr gh;
+          {
+            std::lock_guard<std::mutex> lk(goal_mutex_);
+            gh = current_goal_handle_;
+          }
+
+          if (gh){
+            try {
+              auto cancel_future = fjt_client_ -> async_cancel_goal(gh);
+              (void)cancel_future;
+            } catch(...){}
+          }
+        }
+      });
+    resume_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+      "/emergency_stop_resume", 10,
+      [this](const std_msgs::msg::Bool::SharedPtr msg){
+        if (msg->data){
+          estop_requested_.store(false);
+        }
+      });
   }
 
   void handle_request(
@@ -114,6 +151,11 @@ private:
 
     if (!move_group_) {
       res->message = "MoveGroup not initialized yet";
+      return;
+    }
+
+    if (estop_requested_.load()) {
+      res->message = "Emergency stop is active. Cannot execute.";
       return;
     }
 
@@ -328,6 +370,9 @@ private:
       return false;
     }
 
+    std::lock_guard<std::mutex> lk(goal_mutex_);
+    current_goal_handle_ = goal_handle;
+
     auto result_future = fjt_client_->async_get_result(goal_handle);
     // duration + 여유
     auto wait_time = std::chrono::milliseconds(static_cast<int>((duration_sec + 2.0) * 1000.0));
@@ -353,6 +398,9 @@ private:
   std::thread mg_spin_thread_;
 
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr js_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr estop_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr resume_sub_;
+
   sensor_msgs::msg::JointState last_js_;
   std::mutex js_mutex_;
   
@@ -365,6 +413,10 @@ private:
   tf2_ros::TransformListener tf_listener_;
   rclcpp_action::Client<FJT>::SharedPtr fjt_client_;
   std::string fjt_action_name_;
+
+  std::atomic<bool> estop_requested_{false};
+  std::mutex goal_mutex_;
+  GoalHandleFJT::SharedPtr current_goal_handle_;
 };
 
 int main(int argc, char** argv)

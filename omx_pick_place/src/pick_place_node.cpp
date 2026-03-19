@@ -10,6 +10,7 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <std_msgs/msg/float32_multi_array.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <std_msgs/msg/bool.hpp>
 
 // Gripper는 MoveIt으로 제어 (arm은 서비스로 위임)
 #include <moveit/move_group_interface/move_group_interface.h>
@@ -37,10 +38,22 @@ public:
       std::bind(&PickPlaceNode::onTargetPose, this, std::placeholders::_1));
 
     // place실행 토픽
-    place_sub_ = this->create_subscription<std_msgs::msg::String>(
-      "/place_command",
+    place_pose_sub_ = this->create_subscription<std_msgs::msg::Float32MultiArray>(
+      "/place_pose",
       rclcpp::QoS(10),
-      std::bind(&PickPlaceNode::onPlaceCommand, this, std::placeholders::_1));
+      std::bind(&PickPlaceNode::onPlacePose, this, std::placeholders::_1));
+
+    // 긴급 정지
+    estop_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+      "/emergency_stop", 
+      rclcpp::QoS(10),
+      std::bind(&PickPlaceNode::onEmergencyStop, this, std::placeholders::_1));
+
+    // 긴급 정지 해제
+    resume_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+      "/emergency_stop_resume", 
+      rclcpp::QoS(10),
+      std::bind(&PickPlaceNode::onEmergencyStopResume, this, std::placeholders::_1));
 
     // 완료 신호 publish
     mani_cmd_pub_ = this->create_publisher<std_msgs::msg::String>("/mani_command", 10);
@@ -75,17 +88,34 @@ public:
   }
 
 private:
-  void onPlaceCommand(const std_msgs::msg::String::SharedPtr)
+  void onPlacePose(const std_msgs::msg::Float32MultiArray::SharedPtr msg)
   {
     // NOTE: MultiThreadedExecutor에서 콜백은 병렬 실행될 수 있으므로
     //       재진입 방지를 위해 atomic flag 사용.
     if (busy_.exchange(true)) {
-      RCLCPP_WARN(get_logger(), "Pick or Place is already running. Ignoring /place_command.");
+      RCLCPP_WARN(get_logger(), "Pick or Place is already running. Ignoring /place_pose.");
       return;
     }
 
+    // 좌표 데이터 확인
+    if (msg->data.size() < 3){
+      RCLCPP_ERROR(get_logger(), "Received /place_pose with insufficient data (need at least 3 floats)");
+      busy_.store(false);
+      return;
+    }
+
+    // data mm -> m
+    msg->data[0] *= 0.001;
+    msg->data[1] *= 0.001;
+    msg->data[2] *= 0.001;
+    const double x = static_cast<double>(msg->data[0]);
+    const double y = static_cast<double>(msg->data[1]);
+    const double z = static_cast<double>(msg->data[2]);
+    
+    this->set_parameter(rclcpp::Parameter("place.position", std::vector<double>{x, y, z}));
+    
     // IMPORTANT:
-    // /place_command 구독 콜백에서 MoveIt execute(), 서비스 호출 wait 등
+    // /place_pose 구독 콜백에서 MoveIt execute(), 서비스 호출 wait 등
     // 시간이 오래 걸리는 작업을 바로 수행하면, 같은 executor가 처리해야 하는
     // MoveIt action 응답(GoalResponse/Result) 콜백이 지연/꼬이면서
     // "unknown goal response" -> abort/timeout로 이어질 수 있습니다.
@@ -124,6 +154,10 @@ private:
       return;
     }
 
+    // data mm -> m
+    msg->data[0] *= 0.001;
+    msg->data[1] *= 0.001;
+    msg->data[2] *= 0.001;
     const double x = static_cast<double>(msg->data[0]);
     const double y = static_cast<double>(msg->data[1]);
     const double z = static_cast<double>(msg->data[2]);
@@ -153,6 +187,33 @@ private:
 
       self->busy_.store(false);
     }).detach();
+  }
+
+  void onEmergencyStop(const std_msgs::msg::Bool::SharedPtr msg)
+  {
+    if (msg->data) {
+      estop_requested_.store(true);
+
+      try {
+        if (gripper_) {
+          gripper_->stop();
+        }
+      } catch(...){}
+    }
+  }
+
+  void onEmergencyStopResume(const std_msgs::msg::Bool::SharedPtr msg)
+  {
+    if (msg->data){
+      estop_requested_.store(false);
+    }
+  }
+
+  void check_estop()
+  {
+    if (estop_requested_.load()) {
+      throw std::runtime_error("Emergency stop is active. Cannot execute.");
+    }
   }
 
   // // ---- Pick & Place 실행 ----
@@ -352,13 +413,21 @@ private:
   {
     RCLCPP_INFO(get_logger(), "START PICK");
 
+    check_estop();
     gripper("open");
 
+    check_estop();
     move_arm_via_service(pregrasp(pick));
     rclcpp::sleep_for(std::chrono::milliseconds(500));
+
+    check_estop();
     move_arm_via_service(pick);
+
+    check_estop();
     gripper("close");
     rclcpp::sleep_for(std::chrono::milliseconds(2000));
+
+    check_estop();
     move_arm_via_service(lift(pick));
 
     RCLCPP_INFO(get_logger(), "PICK DONE");
@@ -368,9 +437,16 @@ private:
   {
     RCLCPP_INFO(get_logger(), "START PLACE");
     
+    check_estop();
     move_arm_via_service(lift(place));
+
+    check_estop();
     move_arm_via_service(place);
+
+    check_estop();
     gripper("open");
+
+    check_estop();
     move_arm_via_service(lift(place));
 
     RCLCPP_INFO(get_logger(), "PLACE DONE");
@@ -381,10 +457,13 @@ private:
   std::shared_ptr<moveit::planning_interface::MoveGroupInterface> gripper_;
 
   rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr target_pose_sub_;
-  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr place_sub_;
+  rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr place_pose_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr estop_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr resume_sub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mani_cmd_pub_;
 
   std::atomic<bool> busy_{false};
+  std::atomic<bool> estop_requested_{false};
 };
 
 int main(int argc, char ** argv)
