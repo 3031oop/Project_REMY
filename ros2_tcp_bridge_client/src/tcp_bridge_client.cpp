@@ -17,6 +17,7 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/string.hpp"
+#include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/float32_multi_array.hpp"
 #include "trajectory_msgs/msg/joint_trajectory.hpp"
 #include "trajectory_msgs/msg/joint_trajectory_point.hpp"
@@ -32,10 +33,13 @@ public:
     server_port_ = this->declare_parameter<int>("server_port", 5000);
     client_id_ = this->declare_parameter<std::string>("client_id", "OMXA");
     password_ = this->declare_parameter<std::string>("password", "PASSWD");
-    target_id_ = this->declare_parameter<std::string>("target_id", "ARD");
+    target_id_ = this->declare_parameter<std::string>("target_id", "LR");
     reconnect_period_ms_ = this->declare_parameter<int>("reconnect_period_ms", 2000);
 
     target_pose_pub_ = this->create_publisher<std_msgs::msg::Float32MultiArray>("/target_pose", 10);
+    place_pose_pub_ = this->create_publisher<std_msgs::msg::Float32MultiArray>("/place_pose", 10);
+    estop_pub_ = this->create_publisher<std_msgs::msg::Bool>("/emergency_stop", 10);
+    resume_pub_ = this->create_publisher<std_msgs::msg::Bool>("/emergency_stop_resume", 10);
     arm_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>("/arm_controller/joint_trajectory", 10);
 
     omx_command_sub_ = this->create_subscription<std_msgs::msg::String>(
@@ -203,10 +207,34 @@ private:
             publishArmMoveCommand(2);
           }
         }
+        else if (command == "PICK" || command == "PLACE"){
+          if (argument.find(',') != std::string::npos){
+            std::vector<std::string> value_tokens = splitString(argument, ',');
+
+            if (!isFloatList(value_tokens)) {
+              RCLCPP_WARN(this->get_logger(), "Invalid float payload: %s", payload.c_str());
+              continue;
+            }
+
+            std_msgs::msg::Float32MultiArray out_msg;
+
+            for (const auto & token : value_tokens) {
+              out_msg.data.push_back(std::stof(token));
+            }
+
+            if (command == "PICK") {
+              target_pose_pub_->publish(out_msg);
+              RCLCPP_INFO(this->get_logger(), "PICK POSE RX -> published %zu values", out_msg.data.size());
+            }
+            else {
+              place_pose_pub_->publish(out_msg);
+              RCLCPP_INFO(this->get_logger(), "Published PLACE command: %s", argument.c_str());
+            }
+          }
+        }
         continue;
       }
-
-      if (payload.find(',') != std::string::npos) {
+      else if (payload.find(',') != std::string::npos) {
         std::vector<std::string> value_tokens = splitString(payload, ',');
 
         if (!isFloatList(value_tokens)) {
@@ -225,6 +253,25 @@ private:
         RCLCPP_INFO(this->get_logger(), "POSE RX -> published %zu values", out_msg.data.size());
 
         continue;
+      }
+      else
+      {
+        const std::string & command = payload;
+
+        if (command == "STOP")
+        {
+          std_msgs::msg::Bool estop_msg;
+          estop_msg.data = true;
+          estop_pub_->publish(estop_msg);
+          RCLCPP_INFO(this->get_logger(), "Published emergency stop");
+        }
+        else if (command == "RESUME")
+        {
+          std_msgs::msg::Bool resume_msg;
+          resume_msg.data = true;
+          resume_pub_->publish(resume_msg);
+          RCLCPP_INFO(this->get_logger(), "Published emergency stop resume");
+        }
       }
     }
   }
@@ -350,7 +397,10 @@ private:
   int reconnect_period_ms_;
 
   rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr target_pose_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr place_pose_pub_;
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr arm_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr estop_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr resume_pub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr omx_command_sub_;
   rclcpp::TimerBase::SharedPtr reconnect_timer_;
 
