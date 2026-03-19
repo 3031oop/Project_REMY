@@ -6,13 +6,9 @@ from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
-import keyboard
+import soundfile as sf
 from faster_whisper import WhisperModel
-
-try:
-    import winsound
-except ImportError:
-    winsound = None
+from pynput import keyboard
 
 
 # =========================
@@ -26,7 +22,7 @@ PASSWORD = "PASSWD"
 
 # 현재 팀 구조 호환용 ID
 WA_TARGET_ID = "WA"        # 터틀봇 브리지 ID
-MAIN_TARGET_ID = "OMXA"        # 상위 판단/브리지 쪽 ID (필요시 EYE/OMXA로 조정)
+MAIN_TARGET_ID = "OMXA"    # 상위 판단/브리지 쪽 ID (필요시 EYE/OMXA로 조정)
 
 
 # =========================
@@ -43,7 +39,8 @@ COMPUTE_TYPE = "int8"
 MIN_RECORD_SEC = 0.4
 SLEEP_SEC = 0.02
 
-AUDIO_DIR = Path(r"C:\Users\KCCISTC\Desktop\finalproject_sound_voice\final_TTS")
+# 우분투 경로
+AUDIO_DIR = Path("/home/ubuntu/finalproject_sound_voice/final_TTS")
 
 
 # =========================
@@ -70,6 +67,10 @@ is_audio_playing = False
 
 sock = None
 recv_stop = False
+
+# 키 입력 상태
+space_pressed = False
+esc_pressed = False
 
 
 # =========================
@@ -117,7 +118,7 @@ PAYLOAD_AUDIO_MAP = {
     # 재료
     "salt_move": ("salt_move.wav", "MEDIUM"),
     "pepper_move": ("pepper_move.wav", "MEDIUM"),
-    "suger_move": ("suger_move.wav", "MEDIUM"),
+    "suger_move": ("suger_move.wav", "MEDIUM"),  # 실제 파일명 확인 필요
 
     # 터틀봇
     "patrol": ("tb_patrol_start.wav", "MEDIUM"),
@@ -162,9 +163,7 @@ def audio_callback(indata, frames, time_info, status):
 # 텍스트 정규화
 # =========================
 def normalize_text(text: str) -> str:
-    t = text.strip().lower()
-    t = t.replace(" ", "")
-    return t
+    return text.strip().lower().replace(" ", "")
 
 
 # =========================
@@ -214,14 +213,15 @@ def map_command(text: str):
 
 
 # =========================
-# WAV 재생
+# WAV 재생 (Ubuntu/Linux)
 # =========================
 def play_wav_blocking(file_path: Path):
-    if winsound is None:
-        print("[오디오 에러] winsound 사용 불가")
-        return
-
-    winsound.PlaySound(str(file_path), winsound.SND_FILENAME)
+    try:
+        data, fs = sf.read(str(file_path), dtype="float32")
+        sd.play(data, fs)
+        sd.wait()
+    except Exception as e:
+        print(f"[오디오 재생 에러] {e}")
 
 
 # =========================
@@ -258,6 +258,7 @@ def audio_worker():
             skip = False
 
             with audio_lock:
+                # 현재 구조는 "재생 전 우선순위 판단"만 수행
                 if is_audio_playing and priority < current_audio_priority:
                     print(f"[오디오] 더 높은 우선순위 재생 중, 무시: {event_code}")
                     skip = True
@@ -273,7 +274,7 @@ def audio_worker():
             play_wav_blocking(file_path)
 
         except Exception as e:
-            print(f"[오디오 에러] {e}")
+            print(f"[오디오 워커 에러] {e}")
 
         finally:
             with audio_lock:
@@ -292,23 +293,25 @@ def send_wire_message(target_id: str, payload: str):
 
     if sock is None:
         print("[송신 실패] 소켓 없음")
-        return
+        return False
 
     try:
         msg = f"[{target_id}]{payload}\n"
         sock.sendall(msg.encode("utf-8"))
         print(f"[SEND] {msg.strip()}")
+        return True
     except Exception as e:
         print(f"[송신 에러] {e}")
         enqueue_audio_from_payload("error_comm")
+        return False
 
 
 # =========================
 # 이벤트 처리
-# 현재 팀 구조에 맞게:
+# 현재 팀 구조 기준:
 # - EV_CHECK_REQUEST -> WA patrol 시작 (tts1)
 # - EV_CONFIRM_DONE -> WA return 시작 (tts2)
-# - 나머지 시스템 이벤트는 MAIN_TARGET_ID로 전달
+# - 나머지 이벤트는 MAIN_TARGET_ID로 전달
 # =========================
 def dispatch_event(event_code: str):
     if event_code == "EV_UNKNOWN":
@@ -325,14 +328,14 @@ def dispatch_event(event_code: str):
         send_wire_message(WA_TARGET_ID, "tts2")
         return
 
-    # 나머지는 상위 판단 쪽으로 전달
-    send_wire_message(MAIN_TARGET_ID, event_code.lower())
+    # 이벤트 원형 유지
+    send_wire_message(MAIN_TARGET_ID, event_code)
 
 
 # =========================
 # 서버 수신
 # 서버가 주는 메시지 형식: [SENDER]payload
-# ex) [HSJ_WF]detect
+# ex) [WA]detect
 # =========================
 def recv_loop():
     global recv_stop, sock
@@ -358,15 +361,16 @@ def recv_loop():
                 handle_server_message(line)
 
         except Exception as e:
-            print(f"[수신 에러] {e}")
-            enqueue_audio_from_payload("error_comm")
+            if not recv_stop:
+                print(f"[수신 에러] {e}")
+                enqueue_audio_from_payload("error_comm")
             break
 
 
 def handle_server_message(line: str):
-    # 기대 형식: [SENDER]payload
     try:
         if "]" not in line or "[" not in line:
+            print(f"[수신 무시] 형식 불일치: {line}")
             return
 
         open_idx = line.find("[")
@@ -376,11 +380,16 @@ def handle_server_message(line: str):
         payload = line[close_idx + 1:].strip()
 
         if not payload:
+            print(f"[수신 무시] payload 없음: {line}")
             return
 
-        # 현재는 payload 기반으로 바로 오디오 재생
-        # ex) detect, depart, wait_return, force_return, patrol, return ...
-        enqueue_audio_from_payload(payload)
+        print(f"[수신 발신자] {sender}")
+        print(f"[수신 payload] {payload}")
+
+        if payload in PAYLOAD_AUDIO_MAP:
+            enqueue_audio_from_payload(payload)
+        else:
+            print(f"[오디오 무시] 미정의 payload: {payload}")
 
     except Exception as e:
         print(f"[메시지 파싱 에러] {e}")
@@ -455,10 +464,35 @@ def connect_server():
 
 
 # =========================
+# 키보드 이벤트 (Ubuntu용)
+# =========================
+def on_press(key):
+    global space_pressed, esc_pressed
+
+    try:
+        if key == keyboard.Key.space:
+            space_pressed = True
+        elif key == keyboard.Key.esc:
+            esc_pressed = True
+    except Exception:
+        pass
+
+
+def on_release(key):
+    global space_pressed
+
+    try:
+        if key == keyboard.Key.space:
+            space_pressed = False
+    except Exception:
+        pass
+
+
+# =========================
 # 메인
 # =========================
 def main():
-    global is_recording, audio_chunks, recv_stop
+    global is_recording, audio_chunks, recv_stop, esc_pressed, sock
 
     validate_audio_dir()
 
@@ -467,6 +501,9 @@ def main():
 
     connect_server()
     threading.Thread(target=recv_loop, daemon=True).start()
+
+    listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+    listener.start()
 
     print("[1] Whisper 모델 로딩 시작...")
     model = WhisperModel(
@@ -495,12 +532,12 @@ def main():
 
         while True:
             try:
-                if keyboard.is_pressed("esc"):
+                if esc_pressed:
                     print("\n[종료] 프로그램을 종료합니다.")
                     recv_stop = True
                     break
 
-                current_space_state = keyboard.is_pressed("space")
+                current_space_state = space_pressed
 
                 if current_space_state and not prev_space_state:
                     audio_chunks = []
@@ -537,9 +574,20 @@ def main():
                 print(f"[에러] {e}")
                 time.sleep(0.2)
 
+    # 종료 처리
+    try:
+        listener.stop()
+    except Exception:
+        pass
+
     try:
         if sock:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
             sock.close()
+            sock = None
     except Exception:
         pass
 
@@ -549,5 +597,3 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         print(f"[최상위 에러] {e}")
-        input("엔터 누르면 종료")
- 
