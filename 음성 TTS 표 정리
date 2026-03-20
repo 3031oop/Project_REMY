@@ -1,0 +1,38 @@
+🟦 통합 TTS 매핑표
+카테고리	상황	파일명	TTS / 효과
+시스템 상태	시스템 시작	system_start.wav	조리를 시작합니다
+	대기 상태	system_idle.wav	대기 상태입니다
+	종료	system_finish.wav	조리를 종료합니다
+	자동 복귀	system_auto_return.wav	대기 상태로 복귀합니다
+
+| 도마 (COOK) | 객체 감지 | detect.wav | 도구가 감지되었습니다 |
+| | 조리 안전 | cook_safe.wav | 이상없습니다 |
+| | 객체 존재 안내 | cook_object.wav | 도마 영역에 도구가 있습니다 |
+| | 위험 감지 | danger.wav | ⚠️ 위험 효과음 |
+| | 안전 위치 (손잡이) | (없음) | ✅ 좋은 효과음 |
+
+| 화구 (STOVE) | 화구 시작 | stove_start.wav | 화구 모드를 시작합니다 |
+| | 사용자 이탈 | stove_user_left.wav | 사용자가 화구를 벗어났습니다 |
+| | 위험 경고 | stove_warning.wav | 위험합니다. 화구를 확인해 주세요 |
+| | 복귀 | (없음) | 사용자가 복귀했습니다 |
+
+| 터틀봇 (WA) | 순찰 시작 | tb_patrol_start.wav | 낙하물 탐색을 시작합니다 |
+| | 물체 발견 | tb_object_found.wav | 바닥에 물체가 감지되었습니다 |
+| | 위치 안내 | tb_location.wav | 바닥을 확인해 주세요 |
+| | 확인 요청 | tb_confirm.wav | 확인 후 복귀라고 말씀해 주세요 |
+| | 복귀 | tb_return.wav | 기지로 복귀합니다 |
+| | 자동 복귀 | tb_auto_return.wav | 응답 없어 자동 복귀합니다 |
+
+| 객체 선택 | 칼 | knife.wav | 칼 |
+| | 국자 | ladle.wav | 국자 |
+| | 포크 | fork.wav | 포크 |
+| | 접시 | plate.wav | 접시 |
+
+| 재료 이동 | 소금 | salt_move.wav | 소금 위치 안내 |
+| | 후추 | pepper_move.wav | 후추 위치 안내 |
+| | 설탕 | suger_move.wav | 설탕 위치 안내 |
+
+| 오류 / 예외 | 음성 인식 실패 | error_voice.wav | 음성 인식 실패 |
+| | 센서 오류 | error_sensor.wav | 센서 오류 |
+| | 통신 오류 | error_comm.wav | 통신 오류 |
+| | 안전 정지 | error_safe_stop.wav | 시스템 정지 |
