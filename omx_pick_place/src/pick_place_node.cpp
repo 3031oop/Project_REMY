@@ -306,7 +306,7 @@ private:
 
   geometry_msgs::msg::PoseStamped lift(geometry_msgs::msg::PoseStamped p)
   {
-    p.pose.position.z += 0.05;
+    p.pose.position.z += 0.17;
     return p;
   }
   geometry_msgs::msg::PoseStamped lower(geometry_msgs::msg::PoseStamped p)
@@ -425,7 +425,7 @@ private:
 
     check_estop();
     gripper("close");
-    rclcpp::sleep_for(std::chrono::milliseconds(2000));
+    rclcpp::sleep_for(std::chrono::milliseconds(1000));
 
     check_estop();
     move_arm_via_service(lift(pick));
@@ -451,6 +451,19 @@ private:
 
     RCLCPP_INFO(get_logger(), "PLACE DONE");
   }
+
+  // void execute_pick(geometry_msgs::msg::PoseStamped pick)
+  // {
+  //   gripper("open");
+  //   move_arm_via_service(pick);
+  //   gripper("close");
+  // }
+
+  // void execute_place(geometry_msgs::msg::PoseStamped place)
+  // {
+  //   move_arm_via_service(place);
+  //   gripper("open");
+  // }
 
 private:
   rclcpp::Client<PoseToJointExecute>::SharedPtr pose_exec_client_;

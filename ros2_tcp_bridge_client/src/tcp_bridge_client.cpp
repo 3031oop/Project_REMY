@@ -42,9 +42,9 @@ public:
     resume_pub_ = this->create_publisher<std_msgs::msg::Bool>("/emergency_stop_resume", 10);
     arm_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>("/arm_controller/joint_trajectory", 10);
 
-    omx_command_sub_ = this->create_subscription<std_msgs::msg::String>(
-      "/omx_command", 10,
-      std::bind(&TcpBridgeClient::omxCallback, this, std::placeholders::_1));
+    mani_command_sub_ = this->create_subscription<std_msgs::msg::String>(
+      "/mani_command", 10,
+      std::bind(&TcpBridgeClient::maniCallback, this, std::placeholders::_1));
 
     reconnect_timer_ = this->create_wall_timer(
       std::chrono::milliseconds(reconnect_period_ms_),
@@ -64,9 +64,22 @@ public:
   }
 
 private:
-  void omxCallback(const std_msgs::msg::String::SharedPtr msg)
+  void maniCallback(const std_msgs::msg::String::SharedPtr msg)
   {
-    const std::string wire_msg = "[" + target_id_ + "]" + msg->data;
+    std::string wire_msg;
+
+    if (msg->data == "pick_done")
+    {
+      wire_msg = "[LR]PLACE";
+    }
+    else if(msg->data == "place_done")
+    {
+      wire_msg = "[VOI]PLACE";
+    }
+    else
+    {
+      return;
+    }
 
     if (!connected_) {
       return;
@@ -401,7 +414,7 @@ private:
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr arm_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr estop_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr resume_pub_;
-  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr omx_command_sub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mani_command_sub_;
   rclcpp::TimerBase::SharedPtr reconnect_timer_;
 
   std::thread recv_thread_;
