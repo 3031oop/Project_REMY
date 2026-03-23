@@ -34,12 +34,12 @@ is_person_present = False # 사람이 있는지 없는지
 pending_zone = -1        # 현재 머물고 있는 새로운 구역
 last_sent_zone = -1       # 로봇에게 마지막으로 전송한 구역 
 zone_entry_time = 0     # 사람이 카메라에 잡힌 시간
-STABILIZE_DELAY = 5   # 안정화 시간 (0.5초 동안 머물러야 전송)
-SCAN_DURATION = 5.0
+STABILIZE_DELAY = 3   # 구역 안정화 시간 
+SCAN_DURATION = 3.0
 current_state = 0 # 0: 대기, 1: 도마, 2: 스토브
 scan_step = 0
 scan_timer = 0
-ABSENT_THRESHOLD = 5.0
+ABSENT_THRESHOLD = 3.0
 DIST_THRESHOLD = 0.02
 LOST_HAND_THRESHOLD = 150 # 30프레임(약 1초) 동안 손이 안 보이면 자리를 비운 것으로 간주
 hand_unseen_counter = 0   # 손이 안 보인 프레임을 카운트하는 변수
@@ -86,9 +86,9 @@ def gettingMsg():
                     print(f">>> [THREAD] recvFlag를 True로 변경함! (rsplit: {rsplit})")
                     recvFlag = True
 
-                    if "id@" in rstr.lower():
+                    if "ID@" in rstr.lower():
                         # 정규식으로 id@ 뒤의 숫자 추출
-                        match = re.search(r'id@(\d+)', rstr.lower())
+                        match = re.search(r'ID@(\d+)', rstr.lower())
                         if match:
                             try:
                                 current_target_id = int(match.group(1))
@@ -189,6 +189,7 @@ def socket_send_worker():
 
 
 # ===== 그리기 =====
+
 def draw_landmarks_on_image(tools_dect, hand_dect, frame):
     # --- 추가된 안전장치: hand_dect가 None이면 그림을 그리지 않고 원본 반환 ---
     if hand_dect is None or not hasattr(hand_dect, 'hand_landmarks'):
@@ -196,17 +197,32 @@ def draw_landmarks_on_image(tools_dect, hand_dect, frame):
     landmarks_list = hand_dect.hand_landmarks
     annotated_image = np.copy(frame)
 
+
+
     # 도구 박스
     for (x1,y1,x2,y2), s, _ in tools_dect:
         cv2.rectangle(annotated_image, (x1,y1), (x2,y2), (0,0,255), 2)
-
+    
+    hand_style = mp.solutions.drawing_styles.get_default_hand_landmarks_style()
+    for style in hand_style.values():
+        style.circle_radius = 2
+        # style.thickness = 1
+    
     # 손 랜드마크
     for landmark in landmarks_list:
         landmarks_proto = landmark_pb2.NormalizedLandmarkList()
         for lm in landmark:
             landmarks_proto.landmark.extend([landmark_pb2.NormalizedLandmark(x=lm.x, y=lm.y, z=lm.z)])
+
         if DEBUG_DRAW:
-            solutions.drawing_utils.draw_landmarks(annotated_image,landmarks_proto,solutions.hands.HAND_CONNECTIONS,solutions.drawing_styles.get_default_hand_landmarks_style())
+            mp.solutions.drawing_utils.draw_landmarks(
+                annotated_image,
+                landmarks_proto,
+                mp.solutions.hands.HAND_CONNECTIONS,
+                hand_style, # 크기만 줄인 알록달록 스타일
+                mp.solutions.drawing_styles.get_default_hand_connections_style()
+            )
+            # solutions.drawing_utils.draw_landmarks(annotated_image,landmarks_proto,solutions.hands.HAND_CONNECTIONS,solutions.drawing_styles.get_default_hand_landmarks_style())
     draw_text(annotated_image,TOOLS_NAME[TARGET], TARGET_TXT_ORG,(255,255,0))
     return annotated_image
 def setting_target(tools_result):
@@ -315,7 +331,7 @@ def detection_box(tools_dect, hand_dect, current_frame, depth_frame, intr):
         # 손의 중심점(8번 마디) 픽셀 및 3D 좌표
         mx, my = int(np.clip(hand[8].x * W, 0, W-1)), int(np.clip(hand[8].y * H, 0, H-1))
         m_depth = depth_frame.get_distance(mx, my)
-        cv2.circle(annotated_image, (mx, my), 5, COLOR_BLUE, -1)
+        cv2.circle(annotated_image, (mx, my), 2, COLOR_BLUE, -1)
         
         for lm in hand: hand_pixel.append(lm)
         if m_depth <= 0: continue
@@ -826,8 +842,6 @@ def main():
             elif current_state == 1:
                 status_text = "CUTTING BOARD MODE"
 
-
-
                 # 아루코 마커 인식
                 # if current_target_id is not None:
                 if current_target_id is not None and not aruco_sent:
@@ -846,7 +860,7 @@ def main():
                                     y = point[1] * 1000
                                     z = point[2] * 1000
         
-                                    aruco_msg = f"[LR]{x:.3f}@{y:.3f}@{z:.3f}\n"
+                                    aruco_msg = f"[LR]{x:.3f},{y:.3f},{z:.3f}\n"
                                     send_queue.put(aruco_msg)
                                     aruco_sent = True
                                     print(f"📤 ID {current_target_id} 좌표 1회 전송 완료: {x:.3f}, {y:.3f}, {z:.3f}")
@@ -961,6 +975,15 @@ def main():
                                 elif scan_step == 3:
                                     status_text = "!!! WARNING: STOVE UNATTENDED !!!"
                                     text_color = COLOR_RED
+
+                                    final_wait_time  = time.time() - scan_timer
+
+                                    if final_wait_time > 20:
+                                        print(">>> 20초 경과 : 스토브 자동 차단 명령 전송")
+                                        send_queue.put(f"[STOVE]STOVE@OFF\n")
+                                        is_stove_on = False
+                                        scan_step = 4
+
                 
                             else:
                                 if fid % 15 == 0:
