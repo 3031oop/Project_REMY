@@ -37,7 +37,7 @@ def button_callback():
 			print(f"\n[버튼 클릭] 타켓 변경: {TOOLS_NAME[TARGET]} (Index: {TARGET})")
 
 			try: 
-				msg = f"[OMXA]TARGET@{TARGET}\n"
+				msg = f"[EYE]TARGET@{TARGET}\n"
 				s.send(msg.encode())
 			except:
 				print("서버로 타켓 변경 메시지 전송 실패")
