@@ -3,26 +3,31 @@ import queue
 import socket
 import threading
 from pathlib import Path
+from collections import deque
+import os
 
 import numpy as np
 import sounddevice as sd
-import soundfile as sf
 from faster_whisper import WhisperModel
-from pynput import keyboard
+
+try:
+    import winsound
+except ImportError:
+    winsound = None
 
 
 # =========================
 # 네트워크 설정
 # =========================
-SERVER_HOST = "10.10.141.50"   # PC-A TCP Server IP로 수정
+SERVER_HOST = "10.10.141.126"
 SERVER_PORT = 5000
 
 CLIENT_ID = "VOI"
 PASSWORD = "PASSWD"
 
-# 현재 팀 구조 호환용 ID
-WA_TARGET_ID = "WA"        # 터틀봇 브리지 ID
-MAIN_TARGET_ID = "OMXA"    # 상위 판단/브리지 쪽 ID (필요시 EYE/OMXA로 조정)
+WA_TARGET_ID = "WA"
+MAIN_TARGET_ID = "EYE"
+ALL_TARGET_ID = "ALLMSG"
 
 
 # =========================
@@ -36,11 +41,79 @@ MODEL_SIZE = "base"
 DEVICE = "cpu"
 COMPUTE_TYPE = "int8"
 
-MIN_RECORD_SEC = 0.4
 SLEEP_SEC = 0.02
 
-# 우분투 경로
-AUDIO_DIR = Path("/home/ubuntu/finalproject_sound_voice/final_TTS")
+AUDIO_DIR = Path(r"C:\Users\KCCISTC\Desktop\finalproject_sound_voice\final_TTS")
+
+
+# =========================
+# 호출어 / 연속듣기 설정
+# =========================
+WAKE_WORD_TOKENS = [
+    "레미야",
+    "래미야",
+    "레미",
+    "래미",
+    "remy",
+    "remiya",
+    "애미야",
+    "래이미아",
+    "레이미야",
+    "레몬",
+    "네미야",
+    "Let me",
+    "Let me out",
+    "리미야",
+    "데미아",
+    "레미아",
+    "리미아",
+    "르미아",
+    "러미아",
+    "데미야",
+    "뇌미아",
+    "네, 미아.",
+    "네, 미아",
+    "네, 미아?",
+    "레미안",
+    "렘이야",
+    "러미아",
+    "데뷔",
+    "데뷔야",
+    "LEMIAN",
+    "뷰미아",
+]
+
+WAKE_CHECK_INTERVAL_SEC = 1.0
+WAKE_WINDOW_SEC = 1.2
+WAKE_COOLDOWN_SEC = 2.0
+
+# 명령 녹음 관련
+COMMAND_MAX_SEC = 6.5
+COMMAND_SILENCE_SEC = 1.2
+COMMAND_START_TIMEOUT_SEC = 5.0
+MIN_COMMAND_SEC = 0.20
+
+# 호출 직후 첫 단어가 잘리는 것 방지
+COMMAND_PREROLL_SEC = 0.15
+
+# 배경 잡음 환경 기준
+RMS_SILENCE_THRESHOLD = 0.020
+
+# RMS 디버그 출력
+PRINT_RMS_DEBUG = True
+RMS_PRINT_INTERVAL_SEC = 0.2
+
+# Whisper 잡문장 필터
+NOISE_TEXT_FILTERS = [
+    "감사합니다",
+    "수고하셨습니다",
+    "네",
+    "예",
+    "알겠습니다",
+    "고맙습니다",
+    "네감사합니다",
+    "네알겠습니다",
+]
 
 
 # =========================
@@ -57,9 +130,6 @@ PRIORITY_MAP = {
 # =========================
 # 상태 변수
 # =========================
-is_recording = False
-audio_chunks = []
-
 audio_queue = queue.Queue()
 audio_lock = threading.Lock()
 current_audio_priority = -1
@@ -68,9 +138,19 @@ is_audio_playing = False
 sock = None
 recv_stop = False
 
-# 키 입력 상태
-space_pressed = False
-esc_pressed = False
+mic_lock = threading.Lock()
+recent_audio_chunks = deque()
+recent_audio_total_samples = 0
+
+state_lock = threading.Lock()
+listen_state = "WAIT_WAKE"   # WAIT_WAKE / WAKE_FEEDBACK / COMMAND_LISTENING
+command_chunks = []
+command_started_at = None
+command_last_voice_at = None
+command_has_voice = False
+wake_last_detected_at = 0.0
+last_wake_check_at = 0.0
+last_rms_print_at = 0.0
 
 
 # =========================
@@ -85,6 +165,10 @@ EVENT_DESC_MAP = {
     "EV_SALT": "소금 요청 이벤트",
     "EV_PEPPER": "후추 요청 이벤트",
     "EV_SUGAR": "설탕 요청 이벤트",
+    "EV_KNIFE": "칼 요청 이벤트",
+    "EV_LADLE": "국자 요청 이벤트",
+    "EV_FORK": "포크 요청 이벤트",
+    "EV_PLATE": "접시 요청 이벤트",
     "EV_UNKNOWN": "알 수 없는 명령",
 }
 
@@ -95,14 +179,14 @@ def event_description(event_code: str) -> str:
 
 # =========================
 # TCP 수신 payload -> wav 매핑
-# 서버/브리지에서 [SENDER]payload 형태로 들어오는 payload 기준
 # =========================
 PAYLOAD_AUDIO_MAP = {
     # 시스템
     "system_start": ("system_start.wav", "LOW"),
-    "system_finish": ("system_finish.wav", "LOW"),
     "system_idle": ("system_idle.wav", "LOW"),
-    "system_auto_return": ("system_auto_return.wav", "MEDIUM"),
+
+    # 호출 피드백
+    "wake_ack": ("remy_reback.wav", "MEDIUM"),
 
     # 위험 / 조리
     "danger": ("danger.wav", "CRITICAL"),
@@ -118,7 +202,14 @@ PAYLOAD_AUDIO_MAP = {
     # 재료
     "salt_move": ("salt_move.wav", "MEDIUM"),
     "pepper_move": ("pepper_move.wav", "MEDIUM"),
-    "suger_move": ("suger_move.wav", "MEDIUM"),  # 실제 파일명 확인 필요
+    "suger_move": ("suger_move.wav", "MEDIUM"),
+    "sugar_move": ("suger_move.wav", "MEDIUM"),
+
+    # 객체
+    "knife_move": ("knife.wav", "MEDIUM"),
+    "ladle_move": ("ladle.wav", "MEDIUM"),
+    "fork_move": ("fork.wav", "MEDIUM"),
+    "plate_move": ("plate.wav", "MEDIUM"),
 
     # 터틀봇
     "patrol": ("tb_patrol_start.wav", "MEDIUM"),
@@ -147,23 +238,36 @@ def get_audio_path(filename: str):
 
 
 # =========================
-# 오디오 콜백
-# =========================
-def audio_callback(indata, frames, time_info, status):
-    global is_recording, audio_chunks
-
-    if status:
-        print(f"[오디오 상태] {status}")
-
-    if is_recording:
-        audio_chunks.append(indata.copy())
-
-
-# =========================
 # 텍스트 정규화
 # =========================
 def normalize_text(text: str) -> str:
-    return text.strip().lower().replace(" ", "")
+    t = text.strip().lower()
+    t = t.replace(" ", "")
+    return t
+
+
+def is_wake_word(text: str) -> bool:
+    t = normalize_text(text)
+    tokens = [normalize_text(x) for x in WAKE_WORD_TOKENS]
+    return any(token in t for token in tokens)
+
+
+def is_noise_text(text: str) -> bool:
+    t = normalize_text(text)
+    return t in [normalize_text(x) for x in NOISE_TEXT_FILTERS]
+
+
+def strip_wake_word_prefix(text: str) -> str:
+    t = text.strip()
+    nt = normalize_text(t)
+
+    for token in WAKE_WORD_TOKENS:
+        n_token = normalize_text(token)
+        if nt.startswith(n_token):
+            stripped = t[len(token):].strip(" ,.!?")
+            return stripped if stripped else t
+
+    return t
 
 
 # =========================
@@ -174,38 +278,45 @@ def map_command(text: str):
 
     stop_tokens = ["멈춰", "그만", "정지", "멈추어"]
     end_tokens = ["종료", "끝낼", "끝났", "끝", "다했", "다했어"]
+
     salt_tokens = ["소금", "소금줘", "소금가져", "소금가져다줘"]
     pepper_tokens = ["후추", "후추줘", "후추가져", "후추가져다줘"]
     sugar_tokens = ["설탕", "설탕줘", "설탕가져", "설탕가져다줘"]
-    start_strong_tokens = ["시작"]
+
+    knife_tokens = ["칼", "칼줘", "칼가져", "칼가져다줘", "나이프", "knife"]
+    ladle_tokens = ["국자", "국자줘", "국자가져", "국자가져다줘", "ladle"]
+    fork_tokens = ["포크", "뽀크", "보컬", "포크줘", "포크가져", "포크가져다줘", "fork"]
+    plate_tokens = ["접시", "탑시", "접시줘", "접시가져", "접시가져다줘", "플레이트", "plate"]
+
+    start_strong_tokens = ["시작", "사장"]
     start_weak_tokens = ["조리", "요리"]
     check_request_tokens = ["떨어", "도와", "찾아", "확인해", "뭐있", "뭐있어", "뭐있나"]
     confirm_done_tokens = ["오케이", "알았", "확인됐", "됐다", "복귀", "돌아가", "복기"]
 
     if any(token in t for token in stop_tokens):
         return "EV_STOP"
-
     if any(token in t for token in end_tokens):
         return "EV_END"
-
     if any(token in t for token in salt_tokens):
         return "EV_SALT"
-
     if any(token in t for token in pepper_tokens):
         return "EV_PEPPER"
-
     if any(token in t for token in sugar_tokens):
         return "EV_SUGAR"
-
+    if any(token in t for token in knife_tokens):
+        return "EV_KNIFE"
+    if any(token in t for token in ladle_tokens):
+        return "EV_LADLE"
+    if any(token in t for token in fork_tokens):
+        return "EV_FORK"
+    if any(token in t for token in plate_tokens):
+        return "EV_PLATE"
     if any(token in t for token in start_strong_tokens):
         return "EV_START"
-
     if any(token in t for token in start_weak_tokens):
         return "EV_START"
-
     if any(token in t for token in check_request_tokens):
         return "EV_CHECK_REQUEST"
-
     if any(token in t for token in confirm_done_tokens):
         return "EV_CONFIRM_DONE"
 
@@ -213,13 +324,15 @@ def map_command(text: str):
 
 
 # =========================
-# WAV 재생 (Ubuntu/Linux)
+# WAV 재생
 # =========================
 def play_wav_blocking(file_path: Path):
+    if winsound is None:
+        print("[오디오 에러] winsound 사용 불가")
+        return
+
     try:
-        data, fs = sf.read(str(file_path), dtype="float32")
-        sd.play(data, fs)
-        sd.wait()
+        winsound.PlaySound(str(file_path), winsound.SND_FILENAME)
     except Exception as e:
         print(f"[오디오 재생 에러] {e}")
 
@@ -242,7 +355,32 @@ def enqueue_audio_from_payload(payload: str):
         print(f"[오디오] 파일 없음: {filename}")
         return
 
+    print(f"[오디오 큐] {payload} -> {filename} ({priority_name})")
     audio_queue.put((priority, payload, file_path))
+
+
+def play_feedback_blocking(payload: str):
+    if payload not in PAYLOAD_AUDIO_MAP:
+        return
+
+    filename, priority_name = PAYLOAD_AUDIO_MAP[payload]
+    file_path = get_audio_path(filename)
+    if file_path is None:
+        print(f"[오디오] 파일 없음: {filename}")
+        return
+
+    print(f"[오디오 재생] {payload} -> {file_path.name}")
+    with audio_lock:
+        global is_audio_playing, current_audio_priority
+        is_audio_playing = True
+        current_audio_priority = PRIORITY_MAP[priority_name]
+
+    try:
+        play_wav_blocking(file_path)
+    finally:
+        with audio_lock:
+            is_audio_playing = False
+            current_audio_priority = -1
 
 
 # =========================
@@ -258,7 +396,6 @@ def audio_worker():
             skip = False
 
             with audio_lock:
-                # 현재 구조는 "재생 전 우선순위 판단"만 수행
                 if is_audio_playing and priority < current_audio_priority:
                     print(f"[오디오] 더 높은 우선순위 재생 중, 무시: {event_code}")
                     skip = True
@@ -274,7 +411,7 @@ def audio_worker():
             play_wav_blocking(file_path)
 
         except Exception as e:
-            print(f"[오디오 워커 에러] {e}")
+            print(f"[오디오 에러] {e}")
 
         finally:
             with audio_lock:
@@ -286,13 +423,13 @@ def audio_worker():
 
 # =========================
 # 서버 송신
-# 현재 서버 형식 호환: [TO]payload
 # =========================
 def send_wire_message(target_id: str, payload: str):
     global sock
 
     if sock is None:
         print("[송신 실패] 소켓 없음")
+        enqueue_audio_from_payload("error_comm")
         return False
 
     try:
@@ -308,34 +445,75 @@ def send_wire_message(target_id: str, payload: str):
 
 # =========================
 # 이벤트 처리
-# 현재 팀 구조 기준:
-# - EV_CHECK_REQUEST -> WA patrol 시작 (tts1)
-# - EV_CONFIRM_DONE -> WA return 시작 (tts2)
-# - 나머지 이벤트는 MAIN_TARGET_ID로 전달
 # =========================
 def dispatch_event(event_code: str):
     if event_code == "EV_UNKNOWN":
         enqueue_audio_from_payload("error_voice")
         return
 
+    if event_code == "EV_START":
+        enqueue_audio_from_payload("system_start")
+        send_wire_message(MAIN_TARGET_ID, "START")
+        return
+
+    if event_code == "EV_END":
+        enqueue_audio_from_payload("system_idle")
+        send_wire_message(MAIN_TARGET_ID, "FINISH")
+        return
+
+    if event_code == "EV_STOP":
+        enqueue_audio_from_payload("error_safe_stop")
+        send_wire_message(MAIN_TARGET_ID, "STOP")
+        return
+
+    if event_code == "EV_SALT":
+        enqueue_audio_from_payload("salt_move")
+        send_wire_message(MAIN_TARGET_ID, "ID@1")
+        return
+
+    if event_code == "EV_PEPPER":
+        enqueue_audio_from_payload("pepper_move")
+        send_wire_message(MAIN_TARGET_ID, "ID@2")
+        return
+
+    if event_code == "EV_SUGAR":
+        enqueue_audio_from_payload("suger_move")
+        send_wire_message(MAIN_TARGET_ID, "ID@3")
+        return
+
+    if event_code == "EV_KNIFE":
+        enqueue_audio_from_payload("knife_move")
+        send_wire_message(MAIN_TARGET_ID, "OBJ@KNIFE")
+        return
+
+    if event_code == "EV_LADLE":
+        enqueue_audio_from_payload("ladle_move")
+        send_wire_message(MAIN_TARGET_ID, "OBJ@LADLE")
+        return
+
+    if event_code == "EV_FORK":
+        enqueue_audio_from_payload("fork_move")
+        send_wire_message(MAIN_TARGET_ID, "OBJ@FORK")
+        return
+
+    if event_code == "EV_PLATE":
+        enqueue_audio_from_payload("plate_move")
+        send_wire_message(MAIN_TARGET_ID, "OBJ@PLATE")
+        return
+
     if event_code == "EV_CHECK_REQUEST":
-        # 터틀봇 순찰 시작
+        enqueue_audio_from_payload("patrol")
         send_wire_message(WA_TARGET_ID, "tts1")
         return
 
     if event_code == "EV_CONFIRM_DONE":
-        # 터틀봇 복귀 시작
+        enqueue_audio_from_payload("return")
         send_wire_message(WA_TARGET_ID, "tts2")
         return
-
-    # 이벤트 원형 유지
-    send_wire_message(MAIN_TARGET_ID, event_code)
 
 
 # =========================
 # 서버 수신
-# 서버가 주는 메시지 형식: [SENDER]payload
-# ex) [WA]detect
 # =========================
 def recv_loop():
     global recv_stop, sock
@@ -361,16 +539,14 @@ def recv_loop():
                 handle_server_message(line)
 
         except Exception as e:
-            if not recv_stop:
-                print(f"[수신 에러] {e}")
-                enqueue_audio_from_payload("error_comm")
+            print(f"[수신 에러] {e}")
+            enqueue_audio_from_payload("error_comm")
             break
 
 
 def handle_server_message(line: str):
     try:
         if "]" not in line or "[" not in line:
-            print(f"[수신 무시] 형식 불일치: {line}")
             return
 
         open_idx = line.find("[")
@@ -380,46 +556,56 @@ def handle_server_message(line: str):
         payload = line[close_idx + 1:].strip()
 
         if not payload:
-            print(f"[수신 무시] payload 없음: {line}")
             return
 
-        print(f"[수신 발신자] {sender}")
-        print(f"[수신 payload] {payload}")
-
-        if payload in PAYLOAD_AUDIO_MAP:
-            enqueue_audio_from_payload(payload)
-        else:
-            print(f"[오디오 무시] 미정의 payload: {payload}")
+        enqueue_audio_from_payload(payload)
 
     except Exception as e:
         print(f"[메시지 파싱 에러] {e}")
 
 
 # =========================
-# Whisper 추론
+# Whisper 공통 추론
 # =========================
-def transcribe_audio(model: WhisperModel, audio_data: np.ndarray):
+def transcribe_to_text(model: WhisperModel, audio_data: np.ndarray):
+    if audio_data is None or len(audio_data) == 0:
+        return ""
+
+    try:
+        segments, info = model.transcribe(
+            audio_data,
+            language="ko",
+            vad_filter=True
+        )
+        text = "".join(seg.text for seg in segments).strip()
+        return text
+    except Exception as e:
+        print(f"[Whisper 에러] {e}")
+        return ""
+
+
+def transcribe_and_dispatch_command(model: WhisperModel, audio_data: np.ndarray):
     if audio_data is None or len(audio_data) == 0:
         print("[결과] 녹음된 데이터가 없음")
         enqueue_audio_from_payload("error_voice")
         return
 
-    print("[상태] 음성 인식 중...")
+    print("[상태] 명령 음성 인식 중...")
 
-    segments, info = model.transcribe(
-        audio_data,
-        language="ko",
-        vad_filter=True
-    )
-
-    text = "".join(seg.text for seg in segments).strip()
+    text = transcribe_to_text(model, audio_data)
 
     if not text:
         print("[원문] 인식 결과 없음")
         enqueue_audio_from_payload("error_voice")
         return
 
+    text = strip_wake_word_prefix(text)
     print(f"[원문] {text}")
+
+    if is_noise_text(text):
+        print("[필터] 잡문장으로 판단되어 무시")
+        enqueue_audio_from_payload("error_voice")
+        return
 
     event_code = map_command(text)
     print(f"[이벤트] {event_code} ({event_description(event_code)})")
@@ -464,35 +650,225 @@ def connect_server():
 
 
 # =========================
-# 키보드 이벤트 (Ubuntu용)
+# 최근 오디오 버퍼 관리
 # =========================
-def on_press(key):
-    global space_pressed, esc_pressed
+def append_recent_audio(chunk_1d: np.ndarray):
+    global recent_audio_total_samples
 
+    now = time.time()
+
+    with mic_lock:
+        recent_audio_chunks.append((now, chunk_1d))
+        recent_audio_total_samples += len(chunk_1d)
+
+        keep_sec = max(WAKE_WINDOW_SEC + COMMAND_PREROLL_SEC + 1.0, 3.0)
+        while recent_audio_chunks and (now - recent_audio_chunks[0][0] > keep_sec):
+            _, old_chunk = recent_audio_chunks.popleft()
+            recent_audio_total_samples -= len(old_chunk)
+            if recent_audio_total_samples < 0:
+                recent_audio_total_samples = 0
+
+
+def get_recent_audio(seconds: float):
+    now = time.time()
+    out = []
+
+    with mic_lock:
+        for ts, chunk in recent_audio_chunks:
+            if now - ts <= seconds:
+                out.append(chunk)
+
+    if not out:
+        return np.array([], dtype=np.float32)
+
+    return np.concatenate(out, axis=0).astype(np.float32)
+
+
+# =========================
+# 오디오 레벨
+# =========================
+def rms_level(x: np.ndarray) -> float:
+    if x is None or len(x) == 0:
+        return 0.0
+    return float(np.sqrt(np.mean(np.square(x))))
+
+
+# =========================
+# 상태 전환
+# =========================
+def enter_command_listening():
+    global listen_state, command_chunks, command_started_at, command_last_voice_at, command_has_voice
+
+    preroll_audio = get_recent_audio(COMMAND_PREROLL_SEC)
+
+    with state_lock:
+        listen_state = "COMMAND_LISTENING"
+        command_chunks = []
+        if len(preroll_audio) > 0:
+            command_chunks.append(preroll_audio.astype(np.float32))
+        command_started_at = time.time()
+        command_last_voice_at = None
+        command_has_voice = False
+
+    print("[상태] 명령 입력 모드 시작")
+
+
+def enter_wake_feedback():
+    with state_lock:
+        global listen_state
+        listen_state = "WAKE_FEEDBACK"
+
+    print("[상태] 호출어 감지 -> 피드백 재생")
+
+
+def reset_to_wait_wake():
+    global listen_state, command_chunks, command_started_at, command_last_voice_at, command_has_voice
+
+    with state_lock:
+        listen_state = "WAIT_WAKE"
+        command_chunks = []
+        command_started_at = None
+        command_last_voice_at = None
+        command_has_voice = False
+
+    print("[상태] 호출 대기 모드")
+
+
+def feedback_then_enter_command_listening():
     try:
-        if key == keyboard.Key.space:
-            space_pressed = True
-        elif key == keyboard.Key.esc:
-            esc_pressed = True
-    except Exception:
-        pass
+        play_feedback_blocking("wake_ack")
+    except Exception as e:
+        print(f"[피드백 재생 에러] {e}")
+
+    enter_command_listening()
 
 
-def on_release(key):
-    global space_pressed
+# =========================
+# 오디오 콜백
+# =========================
+def audio_callback(indata, frames, time_info, status):
+    global command_chunks, command_last_voice_at, command_has_voice, last_rms_print_at
 
-    try:
-        if key == keyboard.Key.space:
-            space_pressed = False
-    except Exception:
-        pass
+    if status:
+        print(f"[오디오 상태] {status}")
+
+    mono = indata.copy().reshape(-1).astype(np.float32)
+    append_recent_audio(mono)
+
+    current_rms = rms_level(mono)
+    now = time.time()
+
+    with state_lock:
+        current_state = listen_state
+
+        if current_state == "COMMAND_LISTENING":
+            command_chunks.append(mono)
+
+            if PRINT_RMS_DEBUG and (now - last_rms_print_at >= RMS_PRINT_INTERVAL_SEC):
+                print(f"[RMS] {current_rms:.5f}")
+                last_rms_print_at = now
+
+            if current_rms >= RMS_SILENCE_THRESHOLD:
+                command_last_voice_at = now
+                command_has_voice = True
+
+
+# =========================
+# 호출어 검사
+# =========================
+def check_wake_word(model: WhisperModel):
+    global wake_last_detected_at
+
+    now = time.time()
+
+    with audio_lock:
+        if is_audio_playing:
+            return
+
+    with state_lock:
+        if listen_state != "WAIT_WAKE":
+            return
+
+    if now - wake_last_detected_at < WAKE_COOLDOWN_SEC:
+        return
+
+    audio_data = get_recent_audio(WAKE_WINDOW_SEC)
+    if len(audio_data) == 0:
+        return
+
+    text = transcribe_to_text(model, audio_data)
+
+    if not text:
+        return
+
+    print(f"[호출어 검사] {text}")
+
+    if is_wake_word(text):
+        wake_last_detected_at = now
+        enter_wake_feedback()
+        threading.Thread(target=feedback_then_enter_command_listening, daemon=True).start()
+
+
+# =========================
+# 명령 종료 조건 검사
+# =========================
+def process_command_state(model: WhisperModel):
+    with state_lock:
+        current_state = listen_state
+        started_at = command_started_at
+        last_voice_at = command_last_voice_at
+        has_voice = command_has_voice
+        local_chunks = command_chunks[:]
+
+    if current_state != "COMMAND_LISTENING" or started_at is None:
+        return
+
+    now = time.time()
+    elapsed = now - started_at
+
+    if not has_voice and elapsed > COMMAND_START_TIMEOUT_SEC:
+        print("[명령] 호출 후 음성 없음 -> 종료")
+        reset_to_wait_wake()
+        return
+
+    should_finish = False
+
+    if elapsed >= COMMAND_MAX_SEC:
+        print("[명령] 최대 녹음 길이 도달 -> 종료")
+        should_finish = True
+
+    if has_voice and last_voice_at is not None:
+        if now - last_voice_at >= COMMAND_SILENCE_SEC:
+            print("[명령] 무음 감지 -> 종료")
+            should_finish = True
+
+    if not should_finish:
+        return
+
+    reset_to_wait_wake()
+
+    if not local_chunks:
+        print("[명령] 수집된 오디오 없음")
+        enqueue_audio_from_payload("error_voice")
+        return
+
+    audio_data = np.concatenate(local_chunks, axis=0).reshape(-1)
+    duration = len(audio_data) / SAMPLE_RATE
+    print(f"[명령] 최종 길이: {duration:.2f}초")
+
+    if duration < MIN_COMMAND_SEC:
+        print("[명령] 너무 짧은 명령")
+        enqueue_audio_from_payload("error_voice")
+        return
+
+    transcribe_and_dispatch_command(model, audio_data)
 
 
 # =========================
 # 메인
 # =========================
 def main():
-    global is_recording, audio_chunks, recv_stop, esc_pressed, sock
+    global recv_stop, last_wake_check_at
 
     validate_audio_dir()
 
@@ -501,9 +877,6 @@ def main():
 
     connect_server()
     threading.Thread(target=recv_loop, daemon=True).start()
-
-    listener = keyboard.Listener(on_press=on_press, on_release=on_release)
-    listener.start()
 
     print("[1] Whisper 모델 로딩 시작...")
     model = WhisperModel(
@@ -514,13 +887,13 @@ def main():
     print("[2] Whisper 모델 로딩 완료")
 
     print("\n사용법:")
-    print("- 스페이스바 누르고 있는 동안만 녹음")
-    print("- 스페이스바 떼면 인식 후 서버로 명령 송신")
-    print("- 서버/장치 상태 메시지를 받으면 WAV 재생")
-    print("- ESC 누르면 종료\n")
-
-    prev_space_state = False
-    record_start_time = None
+    print("- 항상 마이크 입력을 듣습니다")
+    print("- 1초마다 호출어(예: 레미야)를 검사합니다")
+    print("- 호출어 감지 시 '네, 말씀하세요' 피드백을 재생합니다")
+    print("- 피드백 재생이 끝난 뒤 명령 입력 모드로 전환됩니다")
+    print("- 호출 후 최대 5초까지 사용자의 명령 시작을 기다립니다")
+    print("- 말이 끝나고 1.2초 정도 조용하면 자동 인식합니다")
+    print("- Ctrl+C 로 종료\n")
 
     with sd.InputStream(
         samplerate=SAMPLE_RATE,
@@ -528,42 +901,23 @@ def main():
         dtype=DTYPE,
         callback=audio_callback
     ):
-        print("[3] 마이크 입력 대기 중...\n")
+        print("[3] 마이크 상시 대기 중...\n")
 
         while True:
             try:
-                if esc_pressed:
-                    print("\n[종료] 프로그램을 종료합니다.")
-                    recv_stop = True
-                    break
+                now = time.time()
 
-                current_space_state = space_pressed
+                with state_lock:
+                    current_state = listen_state
 
-                if current_space_state and not prev_space_state:
-                    audio_chunks = []
-                    is_recording = True
-                    record_start_time = time.time()
-                    print("[녹음] 시작...")
+                if current_state == "WAIT_WAKE":
+                    if now - last_wake_check_at >= WAKE_CHECK_INTERVAL_SEC:
+                        last_wake_check_at = now
+                        check_wake_word(model)
 
-                elif not current_space_state and prev_space_state:
-                    is_recording = False
-                    duration = time.time() - record_start_time if record_start_time else 0.0
-                    print(f"[녹음] 종료 (길이: {duration:.2f}초)")
+                elif current_state == "COMMAND_LISTENING":
+                    process_command_state(model)
 
-                    if duration < MIN_RECORD_SEC:
-                        print("[경고] 너무 짧게 눌렀음")
-                        enqueue_audio_from_payload("error_voice")
-                    elif len(audio_chunks) == 0:
-                        print("[경고] 녹음된 음성이 없음")
-                        enqueue_audio_from_payload("error_voice")
-                    else:
-                        audio_data = np.concatenate(audio_chunks, axis=0).reshape(-1)
-                        transcribe_audio(model, audio_data)
-                        print()
-
-                    record_start_time = None
-
-                prev_space_state = current_space_state
                 time.sleep(SLEEP_SEC)
 
             except KeyboardInterrupt:
@@ -574,20 +928,9 @@ def main():
                 print(f"[에러] {e}")
                 time.sleep(0.2)
 
-    # 종료 처리
-    try:
-        listener.stop()
-    except Exception:
-        pass
-
     try:
         if sock:
-            try:
-                sock.shutdown(socket.SHUT_RDWR)
-            except Exception:
-                pass
             sock.close()
-            sock = None
     except Exception:
         pass
 
@@ -597,3 +940,4 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         print(f"[최상위 에러] {e}")
+        input("엔터 누르면 종료")
