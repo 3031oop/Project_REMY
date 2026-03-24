@@ -12,19 +12,17 @@ import time,math
 from collections import deque
 import pyrealsense2 as rs
 import select
-
-# =====3/17 onnx======
 import onnxruntime as ort
-
-
-# =====3/16 사람인식(큐 이용)=====
-import queue
-send_queue = queue.Queue()
-# =============================
-
-# =====3/15 사람인식 =====
 from ultralytics import YOLO
 import os
+import queue
+import socket
+import threading
+import re
+
+
+send_queue = queue.Queue()
+
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 yolo_model_path = os.path.join(current_dir, 'yolo11n-pose.pt')
@@ -43,23 +41,16 @@ ABSENT_THRESHOLD = 3.0
 DIST_THRESHOLD = 0.02
 LOST_HAND_THRESHOLD = 150 # 30프레임(약 1초) 동안 손이 안 보이면 자리를 비운 것으로 간주
 hand_unseen_counter = 0   # 손이 안 보인 프레임을 카운트하는 변수
-# person_lost_counter = 0  # 사람이 안 보이는 프레임을 셀 변수
-# LOST_PERSON_THRESHOLD = 30 # 약 2~3초 (15 FPS 기준 30프레임)
-# ========================
-
 current_target_id = None
 aruco_sent = False
+prev_event = ""
+# ========================
 
 
-# =====3/11 소켓 추가 ======
-import socket
-import threading
-import re
-
+# ====== 소켓 ======
 HOST = "127.0.0.1"
 # HOST = "10.10.141.126" 
 PORT = 5000
-# TARGET_ID = "[OMXA]"
 
 recvFlag = False
 rsplit = []
@@ -115,9 +106,6 @@ def gettingMsg():
             break
 
 
-
-# ===========================
-
 # =====onnx==========
 options = ort.SessionOptions()
 options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
@@ -126,13 +114,6 @@ session = ort.InferenceSession("kitchen_model_v2_240_424.onnx", providers=['CPUE
 input_name = "images"
 output_name = "output0"
 
-# ===== ncnn =====
-# net = ncnn.Net()
-# net.opt.num_threads = 4
-# net.opt.use_fp16_storage = True
-# net.opt.use_fp16_arithmetic = True
-# net.load_param("kitchen_model_v2_320.ncnn.param")
-# net.load_model("kitchen_model_v2_320.ncnn.bin")
 DEBUG_DRAW=True
 IMG_W = 448
 IMG_H = 256
@@ -163,15 +144,9 @@ flag_target=False
 flag_blade=False
 
 last_blade_z = 0.0
-
-# ===== 3/12 좌표,led ======
-# prev_blade_pos = [0, 0, 0] # 이전 좌표 저장
-# MOVE_THRESHOLD = 5.0  # 5mm 이상 움직여야 전송
-
 prev_led_msg = ""
-# =====================
 
-# ===== 3/16 사람인식(큐 이용) =====
+
 # 전송 전담 스레드 함수
 def socket_send_worker():
     while True:
@@ -185,19 +160,15 @@ def socket_send_worker():
         except:
             pass
         send_queue.task_done()
-# ===================================
 
 
 # ===== 그리기 =====
-
 def draw_landmarks_on_image(tools_dect, hand_dect, frame):
     # --- 추가된 안전장치: hand_dect가 None이면 그림을 그리지 않고 원본 반환 ---
     if hand_dect is None or not hasattr(hand_dect, 'hand_landmarks'):
         return np.copy(frame)
     landmarks_list = hand_dect.hand_landmarks
     annotated_image = np.copy(frame)
-
-
 
     # 도구 박스
     for (x1,y1,x2,y2), s, _ in tools_dect:
@@ -236,15 +207,7 @@ def setting_target(tools_result):
     if len(target_xy) > 0:
         target_pixel = save_pixel(target_xy)
         target_pixel_ttl=fid
-# def inside_allhand(hand_pixel,target_pixel,W,H):
-#     for lm in hand_pixel:
-#         lm_x = int(lm.x * W); lm_y = int(lm.y * H)
-#         for target in target_pixel:
-#             if check_inside(target, lm_x, lm_y) :
-#                 return True
-#     return False
 
-# ===== 3/9 inside_allhand 함수 수정 =====
 def inside_allhand(hand_pixel,target_pixel,W,H,depth_frame,threshold_z=0.05):
     # global last_blade_z
     min_dz = 99.9
@@ -258,15 +221,6 @@ def inside_allhand(hand_pixel,target_pixel,W,H,depth_frame,threshold_z=0.05):
 
     if target_z <= 0: return False,0.0
 
-
-    # if is_blade and len(target_pixel) > 0:
-    #     target = target_pixel[0]
-    #     tx, ty = (target[0]+ target[2]) // 2, (target[1]+ target[3]) // 2
-   
-    #     current_z = depth_frame.get_distance(tx,ty)
-    #     if current_z > 0:
-    #         last_blade_z = current_z
-
     for lm in hand_pixel:
         lm_x, lm_y = int(lm.x * W), int(lm.y * H)
 
@@ -279,15 +233,7 @@ def inside_allhand(hand_pixel,target_pixel,W,H,depth_frame,threshold_z=0.05):
 
                 if blade_dist < threshold_z:
                     return True, blade_dist
-                # if is_blade:
-                #     dist_hand = depth_frame.get_distance(lm_x,lm_y)
-                #     if dist_hand > 0 and last_blade_z > 0:
-                #         dz = abs(dist_hand - last_blade_z)
-                #         if dz < min_dz: min_dz = dz # 가장 가까운 마디의 거리 저장
-                #         if dz < 0.02:
-                #             return True, dz # 충돌 시 현재 거리 반환
-                # else:
-                #     return True, 0.0
+
     # 충돌 안 했을 때: (False, 관측된 최소 거리) 반환
     return False, min_dz
 
@@ -295,17 +241,11 @@ def detection_box(tools_dect, hand_dect, current_frame, depth_frame, intr):
     target_id = "[VI]"
     global prev_blade_pos, prev_led_msg
 
-    # ====== 3/12 좌표,led =======
-    # global prev_blade_pos, prev_led_msg
-    # pos_id = "[OMXB]"
-    # =======================
-
-
     blade_xy  = [ tools[0] for tools in tools_dect if tools[2] == 0 ]
     # setting_target(tools_dect)
     setting_target(tools_result=tools_dect)
 
-    global target_pixel, blade_pixel,flag_target,flag_blade,blade_pixel_ttl,fid
+    global target_pixel, blade_pixel,flag_target,flag_blade,blade_pixel_ttl,fid, prev_event
     if len(blade_xy)  > 0:
         blade_pixel  = save_pixel(blade_xy)
         blade_pixel_ttl=fid
@@ -320,12 +260,7 @@ def detection_box(tools_dect, hand_dect, current_frame, depth_frame, intr):
         flag_blade=False
         flag_target=False
     hand_pixel=[]
-    # for hand in hand_list:
-    #     middle_x = (int(hand[8].x*W))
-    #     middle_y = (int(hand[8].y*H))
-    #     cv2.circle(annotated_image, (middle_x, middle_y), 5, COLOR_BLUE, -1, cv2.LINE_AA)
-    #     for lm in hand:
-    #         hand_pixel.append(lm)
+
     # 손잡이 확인
     for hand in hand_list:
         # 손의 중심점(8번 마디) 픽셀 및 3D 좌표
@@ -348,32 +283,9 @@ def detection_box(tools_dect, hand_dect, current_frame, depth_frame, intr):
             # diff_x: 좌우(카메라 기준), diff_y: 상하(카메라 기준), diff_z: 깊이(카메라 기준)
             dx = t_point[0] - h_point[0]
             dy = t_point[1] - h_point[1]
-            dz = t_point[2] - h_point[2]
-
-
-            # --- [카메라 90도 회전에 따른 방향 매핑] ---
-            # 사용자 시점 보정: 
-            # 카메라가 왼쪽 -> 깊이(dz)의 변화가 실제 사용자의 좌우(Left/Right)가 됨
-            # 카메라의 세로(dy) 변화가 실제 사용자의 상하(Up/Down)가 됨 (혹은 dx와 매핑)
-            
-            # # 1. 좌우 판정 (카메라 깊이 dz 사용)
-            # if dz < -DIST_THRESHOLD: cam_Right = True # 손보다 카메라에 가까우면 우측 (카메라가 왼쪽에 있으므로)
-            # elif dz > DIST_THRESHOLD: cam_Left = True # 손보다 카메라에서 멀면 좌측
-
-            # # 2. 상하 판정 (카메라 가로 dx 사용)
-            # if dx < -DIST_THRESHOLD: cam_Up = True   # 카메라 기준 왼쪽 = 사용자 기준 위
-            # elif dx > DIST_THRESHOLD: cam_Down = True # 카메라 기준 오른쪽 = 사용자 기준 아래
-        # for target in target_pixel:
-            
-        #     target_middle_x = (target[0] + target[2]) // 2
-        #     target_middle_y = (target[1] + target[3]) // 2
-        #     cv2.circle(annotated_image, (target_middle_x, target_middle_y), 5, (255,255,0), -1, cv2.LINE_AA)
-
-        
+            dz = t_point[2] - h_point[2]    
 
             # 주의: 카메라는 90도 돌아가 있음
-
-
             cam_Up = (dz - dy) > DIST_THRESHOLD
             cam_Down = (dz - dy) < -DIST_THRESHOLD
             cam_Left = (dx + dz) < -DIST_THRESHOLD
@@ -385,70 +297,63 @@ def detection_box(tools_dect, hand_dect, current_frame, depth_frame, intr):
             flag_Left  = cam_Down
             flag_Up    = cam_Left
             flag_Down  = cam_Right
-            # print(f"Target 존재: {len(target_pixel) > 0}, Hand 존재: {len(hand_list) > 0}")
-            # if len(hand_list) > 0 and len(target_pixel) > 0:
-            #     # 여기서 dx, dy, dz가 실제로 얼마인지 확인해보세요.
-            #     print(f"DEBUG -> dx+dz: {dx+dz:.3f}, dz-dy: {dz-dy:.3f}, Threshold: {DIST_THRESHOLD}")
-            #     print(f"Flags -> Up:{flag_Up}, Down:{flag_Down}, Left:{flag_Left}, Right:{flag_Right}")
 
     flag_target, _= inside_allhand(hand_pixel,target_pixel,W,H,depth_frame,0.05)
     flag_blade, blade_dist = inside_allhand(hand_pixel,blade_pixel,W,H, depth_frame,0.05)
 
-
-
-
-    # ===== 3/11 수정 =====
     try:
-        current_event_msg = ""
+        curr_vi_msg = ""
+        curr_voi_msg = ""
+
         if flag_blade:
             draw_text(annotated_image, "DANGER! ", WARNING_TXT_ORG, COLOR_RED)
-            current_event_msg = f"{target_id}DANGER\n" # 위험 신호 제어
+            curr_voi_msg = "[VOI]knife_danger\n"
+            curr_vi_msg = f"{target_id}DANGER\n"
             print(f"danger")             
         elif flag_target:
             draw_text(annotated_image, "DETECTED!", WARNING_TXT_ORG, COLOR_GREEN)
-            current_event_msg = f"{target_id}DETECTED\n" # 감지 신호 전송
+            curr_voi_msg = "[VOI]knife_detected\n"
+            curr_vi_msg = f"{target_id}DETECTED\n"
             print(f"detected")
         elif hand_list:
             if flag_Left:
-                if flag_Up:    current_event_msg = f"{target_id}LED@22\n"
-                elif flag_Down:current_event_msg = f"{target_id}LED@17\n"
-                else:          current_event_msg = f"{target_id}LED@27\n"
+                if flag_Up:    curr_vi_msg = f"{target_id}LED@22\n"
+                elif flag_Down:curr_vi_msg = f"{target_id}LED@17\n"
+                else:          curr_vi_msg = f"{target_id}LED@27\n"
             elif flag_Right:
-                if flag_Up:    current_event_msg = f"{target_id}LED@4\n"
-                elif flag_Down:current_event_msg = f"{target_id}LED@2\n"
-                else:          current_event_msg = f"{target_id}LED@3\n"
-            elif flag_Up:      current_event_msg = f"{target_id}LED@18\n"
-            elif flag_Down:    current_event_msg = f"{target_id}LED@14\n"
+                if flag_Up:    curr_vi_msg = f"{target_id}LED@4\n"
+                elif flag_Down:curr_vi_msg = f"{target_id}LED@2\n"
+                else:          curr_vi_msg = f"{target_id}LED@3\n"
+            elif flag_Up:      curr_vi_msg = f"{target_id}LED@18\n"
+            elif flag_Down:    curr_vi_msg = f"{target_id}LED@14\n"
 
 
 
         # 아무 상태도 아닐 때 상태 초기화 (다시 감지될 수 있도록)
         # if prev_led_msg in [f"{target_id}DANGER\n", f"{target_id}DETECTED\n"]:       
-        if current_event_msg != prev_led_msg:
-            if current_event_msg != "":
+        if curr_vi_msg != prev_led_msg:
+            if curr_vi_msg != "":
                 # s.send(current_event_msg.encode())
-                send_queue.put(current_event_msg)
-                print(f"LED 전송: {current_event_msg.strip()}")
+                send_queue.put(curr_vi_msg)
+                print(f"LED 전송: {curr_vi_msg.strip()}")
             else: 
                 # s.send(f"{target_id}OFF\n".encode())
                 send_queue.put(f"{target_id}OFF\n")
                 # print("상태 초기화")
             
-            prev_led_msg = current_event_msg # 현재 상태 저장
-
-        # if dz <10.0:
-        #     debug_text = f"Z-dist: {dz:.3f}m"
-        #     cv2.putText(annotated_image, debug_text, (30,130), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-        #     # print(f"[DEBUG] 현재 손-칼날 거리: {dz:.3f}m")
-
-
-
+            prev_led_msg = curr_vi_msg # 현재 상태 저장
         
-        # print(f"L:{flag_Left} R:{flag_Right} U:{flag_Up} D:{flag_Down}")
+        if curr_voi_msg != prev_event:
+            if curr_voi_msg != "":
+                send_queue.put(curr_voi_msg)
+                print(f"EVENT 전송: {curr_voi_msg.strip()}")
+            prev_event = curr_voi_msg
+                
+
+
     except Exception as e:
         # 전송 실패 시 조용히 넘어감 (서버 연결 끊김 대비)
         print(f"Error: {e}")
-
 
     return annotated_image
 
@@ -617,23 +522,14 @@ def main():
     options = vision.HandLandmarkerOptions(base_options=base_options, num_hands=2,running_mode=RunningMode.VIDEO )
     hand_detector = vision.HandLandmarker.create_from_options(options)
 
-    #=====3/9추가=====
-    # 1. RealSense 뎁스-컬러 정렬 설정
+    # RealSense 뎁스-컬러 정렬 설정
     
     align_to = rs.stream.color # 뎁스를 컬러에 맞추겠다는 설정
     align = rs.align(align_to)
-    
-    #================
 
-    # 캠
-    # cap = cv2.VideoCapture(0)
-
-    # ======= 추가 =========
     # RealSense 설정 시작
     pipeline = rs.pipeline()
     config = rs.config()
-    # config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-    # config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30) # 뎁스 스트림 추가
 
     # 해상도 변경
     config.enable_stream(rs.stream.color, 424, 240, rs.format.bgr8, 30)
@@ -650,18 +546,17 @@ def main():
     profile = pipeline.start(config)
     # 픽셀 좌표를 3D로 바꾸기 위한 내적 파라미터(Intrinsics) 가져오기
     intr = profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
-    # ======= 추가 =========
 
-    # ===== 3/11 필터 =====
+    # ===== 필터 추가 =====
     # pipeline.start(config) 이후에 추가
     device = profile.get_device()
     depth_sensor = device.first_depth_sensor()
 
-    # 1. 프리셋을 'High Density'로 설정 (먼거리 구멍 메우기에 유리)
+    # 프리셋을 'High Density'로 설정 (먼거리 구멍 메우기에 유리)
     # 0: Custom, 1: High Accuracy, 2: High Density, 3: Medium Density...
     depth_sensor.set_option(rs.option.visual_preset, 2) 
 
-    # 2. 레이저 파워 올리기 (먼거리 반사율 상승)
+    # 레이저 파워 올리기 (먼거리 반사율 상승)
     if depth_sensor.supports(rs.option.laser_power):
         depth_sensor.set_option(rs.option.laser_power, 360) # 최대값 근처로 설정
 
@@ -671,15 +566,6 @@ def main():
     global scan_step,scan_timer,hand_unseen_counter
     global current_target_id, aruco_sent
 
-    # if not cap.isOpened():
-    #     print("웹 캠을 열 수 없습니다")
-
-    # GPIO.setmode(GPIO.BCM)
-    # for led in LED_NUMBER:
-    #     GPIO.setup(led,GPIO.OUT)
-    # GPIO.setup(21, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
-    # GPIO.add_event_detect(21, GPIO.RISING, callback=button_callback, bouncetime=300)
-    # print(sd.query_devices())
 
    # 최근 30프레임 평균
     t_prev = time.time()
@@ -697,9 +583,6 @@ def main():
     aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
     aruco_params = cv2.aruco.DetectorParameters()
     aruco_detector = cv2.aruco.ArucoDetector(aruco_dict, aruco_params)
-
-
-    
     
     try:
         while True:
@@ -735,22 +618,10 @@ def main():
             
             # 조리 시작
             t0 = time.time()
-            # ret, frame = cap.read()
-            # if not ret: break
-
-            # ======= 추가 ========
-            # while True 루프 내부 수정          
-            # frames = pipeline.wait_for_frames()
             frames = pipeline.poll_for_frames()
 
             if not frames:
                 continue
-
-
-            # aligned_frames = align.process(frames) # 정렬된 프로세스 실행
-            # t1 = time.time() # 뎁스 프레임 수신 및 정렬
-
-             # ===== 3/11 필터 ====== 
             
             aligned_frames = align.process(frames)
 
@@ -770,12 +641,9 @@ def main():
 
             depth_frame = filtered_frame.as_depth_frame()
             color_frame = temp_color_frame
-            # =========================
-
 
             # 리얼센스 데이터를 넘파이 배열로 변환 (기존 코드의 frame 역할)
             frame = np.asanyarray(color_frame.get_data())
-            # ======= 추가 ========
 
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_image  = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
@@ -800,8 +668,6 @@ def main():
                 text_color = (255, 255, 255)
                 if fid % 5 == 0:
                     has_person, center_x, yolo_results = get_valid_person(frame, yolo_model)
-                    # print(f">>> 사람 감지됨")
-                    # yolo_results = yolo_model.track(source=frame, persist=True, max_det=1, verbose=False)
 
                     if has_person:
                         if center_x < 150: target_zone = 1 # 도마
@@ -1016,58 +882,13 @@ def main():
             annotated_image = cv2.resize(annotated_image, (848 , 480 ))
             cv2.imshow("hand_land", annotated_image)
 
-
-
-            # 터미널에 각 구간 소요 시간 출력 (단위: ms)
-            # if fid % 30 == 0: # 30프레임마다 한 번씩 출력
-            #     print(f"Align: {(t1-t0)*1000:.1f}ms | Tools: {(t2-t1)*1000:.1f}ms | Hand: {(t3-t2)*1000:.1f}ms | Box: {(t4-t3)*1000:.1f}ms")
-
-            # if blade_pixel and fid-blade_pixel_ttl>5 and audio_event=='None':
-            #     blade_pixel=[]
-            # if target_pixel and fid-target_pixel_ttl>20 and audio_event=='None':
-            #     target_pixel=[]
-
-            # if elased_time>1.0:
-            #     print(audio_event=="detected")
-            #     t_prev+=elased_time
-            # if audio_event == "danger":
-            #     set_hold_mode("danger")
-            # elif audio_event == "detected":
-            #     set_hold_mode("detected")
-            # else:
-            #     set_hold_mode(None)
-
-            # if hand_result.hand_landmarks:
-            #     for hand_landmarks in hand_result.hand_landmarks:
-            #         finger_tips = hand_landmarks[8]
-            #         u_h = int(np.clip(finger_tips.x * 640, 0, 639))
-            #         v_h = int(np.clip(finger_tips.y * 480, 0, 479))
-
-            #         for obj in tools_result:
-            #             x1,y1,x2,y2 = obj[0]
-            #             obj_y = int ((x1+x2)/2)
-                        
-
-
-            # === FPS 갱신 ===
-            '''
-            t_now = time.time()
-            elased_time=t_now-t_prev
-            if elased_time>1.0:
-                #print(f"fps:{((fid-fid_log)/elased_time):5.2f}")
-                fid_log=fid
-                t_prev+=elased_time
-            '''
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break  
 
     finally:
         pipeline.stop()
         cv2.destroyAllWindows()
-    # cap.release()
-    
-    # cv2.waitKey(1)
-    # GPIO.cleanup()
+
 
 if __name__ == "__main__":
     main()
