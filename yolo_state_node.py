@@ -24,7 +24,6 @@ class FallingObjectSmartReturn(Node):
         model_path = Path('/home/remi/kitchen/kitchen_ncnn_model2')
         self.model = YOLO(str(model_path), task='detect')
         self.bridge = CvBridge()
-
         # 2) RealSense Setup
         self.pipeline = rs.pipeline()
         config = rs.config()
@@ -35,7 +34,6 @@ class FallingObjectSmartReturn(Node):
 
         #ready time
         time.sleep(1.0)
-
 
         #lazer power & freeset setup
         device = profile.get_device()
@@ -84,7 +82,7 @@ class FallingObjectSmartReturn(Node):
 
         # 4) ROS Pub/Sub
         self.cmd_vel_pub = self.create_publisher(TwistStamped, '/cmd_vel', 10)
-        self.image_out_pub = self.create_publisher(Image, '/image_out', 10)
+        #self.image_out_pub = self.create_publisher(Image, '/image_out', 10)
         self.command_pub = self.create_publisher(String, '/waffle_command', 10)
 
 
@@ -108,7 +106,6 @@ class FallingObjectSmartReturn(Node):
         self.get_logger().info(f"Received command: {command}")
 
         #filltering
-        #if command in ['patrol', 'detect', 'depart', 'wait_return', 'force_return', 'return']:
         if command in ['patrol', 'detect', 'depart', 'wait_return', 'force_return']:
             return
 
@@ -126,19 +123,16 @@ class FallingObjectSmartReturn(Node):
 
         #elif command == 'return':
         if command == 'return':
-                self.get_logger().info("Remote RETURN: Stopping current task and going home.")
-                self.send_control(0.0, 0.0)
-                
-                self.state = 'RETURN'
-                self.wait_start_time = None
-                self.prev_sent_state = 'return'
-                #self.state = 'RETURN'
-
-        #elif command == 'force_return':
-        #    self.get_logger().info("Remote FORCE_RETURN: Emergency return initiated!")
-        #    self.send_control(0.0, 0.0)
-        #    self.sound_count = 0
-        #    self.state = 'RETURN'
+            if self.start_pose is None:
+                self.get_logger().error("current xy saved start_pose")
+                self.start_pose = self.get_current_xy()
+            
+            self.get_logger().info("Remote RETURN: Stopping current task and going home.")
+            self.send_control(0.0, 0.0)
+            self.state = 'RETURN'
+            self.wait_start_time = None
+            self.prev_sent_state = 'return'
+            #self.state = 'RETURN'
 
     #logic function
     def get_yaw_from_quaternion(self, q):
@@ -160,14 +154,16 @@ class FallingObjectSmartReturn(Node):
                 # 1.state identify
                 with self.lock:
                     current_state = self.state
-
                 # 2. state
                 if current_state == 'RETURN':
                     time.sleep(1.0)
                     continue
-                
+
                 elif current_state == 'IDLE':
                     time.sleep(0.5)
+
+                elif current_state == 'MOVING':
+                    continue
 
                 frames = self.pipeline.wait_for_frames(timeout_ms=5000)
                 if not frames: continue
@@ -179,12 +175,10 @@ class FallingObjectSmartReturn(Node):
                 if not depth_frame or not color_frame: continue
 
                 #color_image = np.asanyarray(color_frame.get_data())
-                
                 #filtered_depth = self.threshold_filter.process(depth_frame) #(0.1~4.0m delete)
                 filtered_depth = self.spatial.process(depth_frame)
                 #filtered_depth = self.temporal.process(filtered_depth)# frame smooth
                 filtered_depth = self.hole_filling.process(filtered_depth)
-                
                 refined_depth = filtered_depth.as_depth_frame()
                 color_image = np.asanyarray(color_frame.get_data())
 
@@ -192,7 +186,7 @@ class FallingObjectSmartReturn(Node):
                 #current_det = {'cx': None, 'dist': 0.0, 'img': color_image.copy()}
 
                 # YOLO Predict
-                results = self.model.predict(source=color_image, conf=0.5, imgsz=320, device='cpu',half=False, verbose=False)
+                results = self.model.predict(source=color_image, conf=0.6, imgsz=320, device='cpu',classes= [0,1,2], half=False, verbose=False)
                 
                 best_det = None
                 if results and len(results[0].boxes) > 0:
@@ -201,6 +195,11 @@ class FallingObjectSmartReturn(Node):
                     box = r.boxes[0]
                     xyxy = box.xyxy.cpu().numpy()[0].astype(int)
                     cx, cy = int((xyxy[0]+xyxy[2])/2), int((xyxy[1]+xyxy[3])/2)
+                    
+                    for box in r.boxes:
+                        cls_id = int(box.cls[0])
+                        conf = float(box.conf[0])
+                        self.get_logger().info(f"ID: {cls_id}, 확률: {conf:.2f}")
 
                     if 0<= cx < self.width and 0 <= cy < self.height:
                         dist = float(refined_depth.get_distance(cx, cy))
@@ -247,29 +246,17 @@ class FallingObjectSmartReturn(Node):
             cur_x, cur_y = self.get_current_xy()
             cur_yaw_sub = self.get_yaw_from_quaternion(self.current_odom.pose.pose.orientation)
 
-            #if target['cx'] is not None:
-            #    error = (self.width / 2) - target['cx']
-            #    
-            #    if abs(error) > 50:
-            #        slow_down_speed = max(0.12, abs(error) * 0.001) 
-            #        self.send_control(0.0, slow_down_speed if error > 0 else -slow_down_speed)
-            #        self.get_logger().info("Target spotted! Slowing down and centering...")
-            #    else:
-            #        self.send_control(0.0, 0.0)
-            #        self.state = 'DETECT'
-            #    return
-            
             #Hysteresis count
             if target['cx'] is not None:
                     self.lost_count = 0
                     self.send_control(0.0, 0.08)
                     self.stop_count += 1
-                    self.get_logger().info(f"Target spotted! Stability check: {self.stop_count}/5")
+                    self.get_logger().info(f"Target spotted! Stability check: {self.stop_count}/10")
             
                     if self.stop_count >= 10:
                         self.get_logger().info("Target stabilized. Switching to DETECT.")
                         self.send_control(0.0, 0.0)
-                        self.state = 'DETECT'
+                        self.state == 'DETECT'
                         self.stop_count = 0
                     return
             
@@ -279,7 +266,7 @@ class FallingObjectSmartReturn(Node):
                     self.lost_count += 1
                     self.get_logger().warn(f"Target lost! Waiting... {self.lost_count}/2")
                         
-                    if self.lost_count >= 2:
+                    if self.lost_count >= 3:
                         self.get_logger().info("Target completely gone. Resuming Patrol.")
                         self.stop_count = 0
                         self.lost_count = 0
@@ -290,7 +277,8 @@ class FallingObjectSmartReturn(Node):
                     self.patrol_start_pose = (cur_x, cur_y)
                
                 dist = math.sqrt((cur_x - self.patrol_start_pose[0])**2 + (cur_y - self.patrol_start_pose[1])**2)
-                if dist < 1.0:
+                self.get_logger().info(f"target_dist :{dist:.2f}")
+                if dist < 0.8:
                     self.send_control(0.07, 0.0)
                 else:
                     self.send_control(0.0, 0.0)
@@ -301,15 +289,6 @@ class FallingObjectSmartReturn(Node):
             
             #sub_state(patrol) = rotate
             elif self.patrol_sub_state == 'ROTATE':
-                #260320
-                #remaining = self.rotate_end_time - time.time()
-                #if remaining > 0:
-                #    self.send_control(0.0, 0.2)
-                #else:
-                #    self.send_control(0.0, 0.0)
-                #    self.get_logger().warn("Patrol finished without detection. Returning home.")
-                #    self.state = 'RETURN'
-                
                 # 3. Delta Yaw (Wrap-around)
                 diff = cur_yaw_sub - self.last_yaw
                 if diff > math.pi: diff -= 2 * math.pi
@@ -322,7 +301,7 @@ class FallingObjectSmartReturn(Node):
                 if self.total_rotated_yaw < 2 * math.pi:
                     # --- if detect, reduce rotate velocity---
                     if target['cx'] is not None:
-                        self.send_control(0.0, 0.08) 
+                        self.send_control(0.0, 0.07)
                         self.get_logger().info(f"Target in sight! [Rotated: {math.degrees(self.total_rotated_yaw):.1f}deg]")
                     else:
                         self.send_control(0.0, 0.15)
@@ -334,77 +313,88 @@ class FallingObjectSmartReturn(Node):
                     self.state = 'RETURN'
 
         elif self.state == 'DETECT':
+
             if target['cx'] is not None:
-                if abs(self.prev_dist - target['dist']) < 0.03:
-                    self.stop_count += 1
-                else:
-                    self.stop_count = 0
+                self.stop_count += 1
+                self.lost_count =0
+                self.send_control(0.0, 0.0)
+                self.get_logger().info(f"[stop_count1: {self.stop_count:.1f}]")
+            else:
+                self.send_control(0.0, 0.0)
+                self.stop_count = 0
+                self.lost_count += 1
+                self.get_logger().info(f"[stop_count2: {self.stop_count:.1f}]")
                 
-                self.prev_dist = target['dist']
+                if(self.lost_count >= 20):
+                    self.state == 'PATROL'
+                    self.lost_count = 0
+                    return
 
-                if self.stop_count > 5:
+            self.prev_dist = target['dist']
 
-                    #detect msg publish
-                    self.publish_msgs("detect");
-
-                    #rotate ready logic
-                    #85.2 -> 1.487rad
-                    HFOV_RAD = 1.487
-                    self.target_dist = target['dist']
-                    target_angle = -((target['cx'] - (self.width / 2)) / float(self.width)) * HFOV_RAD
-                    self.rotate_cmd = 0.4 if target_angle > 0 else -0.4
-                    self.rotate_end_time = time.time() + abs(target_angle) * 1.3
-                    #self.trigger_sound()
-                    self.state = 'ROTATE'
-                    self.stop_count = 0
-
-        #elif self.state == 'ROTATE':
-        #    if time.time() < self.rotate_end_time:
-        #        self.send_control(0.0, self.rotate_cmd)
-        #    else:
-        #        self.send_control(0.0, 0.0)
-        #        self.move_start_pose = self.get_current_xy()
-        #        self.sound_count = 50
-        #        self.state = 'MOVING'
+            if self.stop_count > 5:
+                #detect msg publish
+                self.publish_msgs("detect");
+                #rotate ready logic
+                #85.2 -> 1.487rad
+                #HFOV_RAD = 1.487
+                self.target_dist = target['dist']
+                self.state = 'ROTATE'
+                self.stop_count = 0
 
         elif self.state == 'ROTATE':
             if target['cx'] is not None:
                 error = (self.width / 2) - target['cx']
                 self.last_error = error
-
-                if abs(error) > 30:
-                    angular_z = error * 0.0008
-
-                    min_speed = 0.12
-                    if abs(angular_z) < min_speed:
-                        angular_z = min_speed if error > 0 else -min_speed
-
-                    angular_z = max(-0.2, min(0.2, angular_z))
-                    self.send_control(0.0, angular_z)
-                else:
+                self.get_logger().info(f"error :{error:.2f}")
+                
+                if abs(error) < 10:
                     self.send_control(0.0, 0.0)
-                    self.get_logger().info("Target Aligned")
+                    self.get_logger().info("Target Aligned! Transitioning to MOVING.")
+                    
                     self.move_start_pose = self.get_current_xy()
+                    self.get_logger().info(f"move start_pose : {self.move_start_pose}")
                     self.sound_count = 50
                     self.state = 'MOVING'
+                else:
+                    #kp = 0.0012
+                    kp = 0.0008
+                    angular_z = error * kp
+                    self.get_logger().info(f"angular_z :{angular_z:.2f}")
+                    
+                    min_rot_speed = 0.08
+                    if abs(angular_z) < min_rot_speed:
+                        angular_z = min_rot_speed if error > 0 else -min_rot_speed
+                    
+                    angular_z = max(-0.15, min(0.15, angular_z))
+                    self.send_control(0.0, angular_z)
+            
             else:
                 if abs(self.last_error) > 20:
                     blind_speed = 0.12 if self.last_error > 0 else -0.12
                     self.send_control(0.0, blind_speed)
+                    self.get_logger().warn("Target lost. Rotating by inertia...")
                 else:
                     self.send_control(0.0, 0.0)
                     self.state = 'DETECT'
+                    self.get_logger().info("Target lost completely. Back to DETECT.")
+                    self.send_control(0.0, 0.0)
 
         elif self.state == 'MOVING':
             cur_x, cur_y = self.get_current_xy()
             moved = math.sqrt((cur_x - self.move_start_pose[0])**2 + (cur_y - self.move_start_pose[1])**2)
-            
-            if moved < max(0.0, self.target_dist - 0.3):
-                self.send_control(0.1, 0.0)
-            
+            self.get_logger().info(f"moved :{moved:.2f}m")
+            remaining_dist = self.target_dist - moved
+            self.get_logger().info(f"remaining :{remaining_dist:.2f}m")
+            #if moved < max(0.0, self.target_dist - 0.3):
+            #    self.send_control(0.08, 0.0)
+            if remaining_dist > 0.3:
+                linear_v = max(0.05, min(0.08, remaining_dist * 0.15))
+                self.send_control(linear_v, 0.0)
+
             #5s, 0.2hz sound buzzer
                 self.sound_count += 1
-                if self.sound_count >= 30:
+                if self.sound_count >= 50:
                     if self.sound_client.service_is_ready():
                         req = SoundSrv.Request()
                         req.value = 3
@@ -420,9 +410,6 @@ class FallingObjectSmartReturn(Node):
                 self.state = 'WAIT'
 
         elif self.state == 'WAIT':
-            #if self.state != 'WAIT':
-            #    self.state = 'RETURN'
-            #    return
 
             if self.wait_start_time is not None:
                 self.publish_msgs("wait_return");
@@ -438,40 +425,28 @@ class FallingObjectSmartReturn(Node):
                     self.wait_start_time = None
             else:
                 pass
-        #elif self.state == 'RETURN':
-        #    cur_x, cur_y = self.get_current_xy()
-        #    remain = math.sqrt((self.start_pose[0] - cur_x)**2 + (self.start_pose[1] - cur_y)**2)
-        #    if remain > 0.05:
-        #        self.send_control(-0.1, 0.0)
-        #    else:
-        #        self.state = 'ALIGN_FINAL'
 
         elif self.state == 'RETURN':
-
-            #status_msg = String()
-            self.publish_msgs("return");
-
+            self.publish_msgs("return")
+            
             cur_x, cur_y = self.get_current_xy()
             cur_yaw = self.get_yaw_from_quaternion(self.current_odom.pose.pose.orientation)
-
+        
             dx = self.start_pose[0] - cur_x
             dy = self.start_pose[1] - cur_y
             dist_to_home = math.sqrt(dx**2 + dy**2)
             angle_to_home = math.atan2(dy, dx)
-
             angle_diff = (angle_to_home - cur_yaw + math.pi) % (2 * math.pi) - math.pi
-
-            if dist_to_home > 0.05:
-                if abs(angle_diff) > 0.2:
-                    self.get_logger().info("Returning: Aligning to home direction...")
-                    self.send_control(0.0, 0.3 if angle_diff > 0 else -0.4)
-                else:
-                    self.get_logger().info(f"Returning: Moving forward... {dist_to_home:.2f}m left")
-                    self.send_control(0.15, 0.0)
+        
+            if dist_to_home > 0.08:
+                v_scale = max(0.0, 1.0 - abs(angle_diff) / (math.pi / 4))
+                linear_v = 0.15 * v_scale
+                angular_v = max(-0.4, min(0.4, angle_diff * 1.5))
+                
+                self.send_control(linear_v, angular_v)
             else:
                 self.send_control(0.0, 0.0)
                 self.state = 'ALIGN_FINAL'
-
 
         elif self.state == 'ALIGN_FINAL':
             cur_yaw = self.get_yaw_from_quaternion(self.current_odom.pose.pose.orientation)
@@ -485,10 +460,10 @@ class FallingObjectSmartReturn(Node):
                 self.prev_sent_state = None
 
         # --- UI Overlay ---
-        cv2.putText(display_image, f"STATE: {self.state}", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
-        if target:
-            cv2.putText(display_image, f"DIST: {target['dist']:.2f}m", (20, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        self.image_out_pub.publish(self.bridge.cv2_to_imgmsg(display_image, encoding='bgr8'))
+        #cv2.putText(display_image, f"STATE: {self.state}", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
+        #if target:
+        #    cv2.putText(display_image, f"DIST: {target['dist']:.2f}m", (20, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        #self.image_out_pub.publish(self.bridge.cv2_to_imgmsg(display_image, encoding='bgr8'))
 
     def send_control(self, linear, angular):
         msg = TwistStamped()
