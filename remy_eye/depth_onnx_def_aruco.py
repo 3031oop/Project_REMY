@@ -48,8 +48,8 @@ prev_event = ""
 
 
 # ====== 소켓 ======
-HOST = "127.0.0.1"
-# HOST = "10.10.141.126" 
+#HOST = "127.0.0.1"
+HOST = "10.10.141.126" 
 PORT = 5000
 
 recvFlag = False
@@ -811,6 +811,7 @@ def main():
                                 # 스토브 켜져 있다면 순차 탐색 시작
                                 if scan_step == 0:
                                     print(">>> [사람 부재] 대기 구역(0) 확인 시작")
+                                    send_queue.put(f"[VOI]stove_user_left\n")
                                     send_queue.put(f"[OMXA]MOVE@0\n")
                                     last_sent_zone = 0
                                     scan_step = 1
@@ -846,7 +847,8 @@ def main():
 
                                     if final_wait_time > 20:
                                         print(">>> 20초 경과 : 스토브 자동 차단 명령 전송")
-                                        send_queue.put(f"[STOVE]STOVE@OFF\n")
+                                        send_queue.put(f"[VOI]stove_warning\n")
+                                        send_queue.put(f"[STOVE]FIRE@OFF\n")
                                         is_stove_on = False
                                         scan_step = 4
 
