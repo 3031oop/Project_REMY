@@ -43,7 +43,7 @@ COMPUTE_TYPE = "int8"
 
 SLEEP_SEC = 0.02
 
-AUDIO_DIR = Path(r"C:\Users\KCCISTC\Desktop\finalproject_sound_voice\final_TTS")
+AUDIO_DIR = Path(r"C:\Users\KCCISTC\Desktop\tts")
 
 
 # =========================
@@ -189,6 +189,8 @@ PAYLOAD_AUDIO_MAP = {
     "wake_ack": ("remy_reback.wav", "MEDIUM"),
 
     # 위험 / 조리
+    "knife_danger": ("danger.wav", "CRITICAL"),
+    "knife_detected": ("detect.wav", "MEDIUM"),
     "danger": ("danger.wav", "CRITICAL"),
     "detect_obj": ("detect.wav", "MEDIUM"),
     "cook_safe": ("cook_safe.wav", "LOW"),
@@ -463,7 +465,7 @@ def dispatch_event(event_code: str):
 
     if event_code == "EV_STOP":
         enqueue_audio_from_payload("error_safe_stop")
-        send_wire_message(MAIN_TARGET_ID, "STOP")
+        send_wire_message(ALL_TARGET_ID, "STOP")
         return
 
     if event_code == "EV_SALT":
@@ -502,12 +504,17 @@ def dispatch_event(event_code: str):
         return
 
     if event_code == "EV_CHECK_REQUEST":
-        enqueue_audio_from_payload("patrol")
         send_wire_message(WA_TARGET_ID, "tts1")
         return
 
     if event_code == "EV_CONFIRM_DONE":
-        enqueue_audio_from_payload("return")
+
+        try:
+            enqueue_audio_from_payload("return")
+        except Exception as e:
+            print(f"[피드백 재생 에러] {e}")
+
+        enter_command_listening()
         send_wire_message(WA_TARGET_ID, "tts2")
         return
 
