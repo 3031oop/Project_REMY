@@ -11,6 +11,8 @@
 #include <std_msgs/msg/float32_multi_array.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/bool.hpp>
+#include "trajectory_msgs/msg/joint_trajectory.hpp"
+#include "trajectory_msgs/msg/joint_trajectory_point.hpp"
 
 // Gripper는 MoveIt으로 제어 (arm은 서비스로 위임)
 #include <moveit/move_group_interface/move_group_interface.h>
@@ -57,6 +59,9 @@ public:
 
     // 완료 신호 publish
     mani_cmd_pub_ = this->create_publisher<std_msgs::msg::String>("/mani_command", 10);
+
+    // arm 직접 제어용 퍼블리셔
+    arm_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>("/arm_controller/joint_trajectory", 10);
 
     // ---- Pick/Place 목표를 파라미터로 받기 (기존 하드코드 기본값 유지) ----
     // 프레임
@@ -108,6 +113,13 @@ private:
     msg->data[0] *= 0.001;
     msg->data[1] *= 0.001;
     msg->data[2] *= 0.001;
+
+    if (msg->data[2] < 0.05) {
+      msg->data[2] = 0.05; // 너무 낮은 위치는 방지
+    }
+
+    RCLCPP_INFO(get_logger(), "x : %f, y : %f, z : %f", msg->data[0], msg->data[1], msg->data[2]);
+
     const double x = static_cast<double>(msg->data[0]);
     const double y = static_cast<double>(msg->data[1]);
     const double z = static_cast<double>(msg->data[2]);
@@ -131,7 +143,7 @@ private:
       }
 
       std_msgs::msg::String out;
-      out.data = ok ? "place_done" : "failed";
+      out.data = ok ? "place_done" : "place_failed";
       self->mani_cmd_pub_->publish(out);
       RCLCPP_INFO(self->get_logger(), "Published /mani_command: %s", out.data.c_str());
 
@@ -158,6 +170,13 @@ private:
     msg->data[0] *= 0.001;
     msg->data[1] *= 0.001;
     msg->data[2] *= 0.001;
+
+    if (msg->data[2] < 0.05) {
+      msg->data[2] = 0.05; // 너무 낮은 위치는 방지
+    }
+
+    RCLCPP_INFO(get_logger(), "x : %f, y : %f, z : %f", msg->data[0], msg->data[1], msg->data[2]);
+
     const double x = static_cast<double>(msg->data[0]);
     const double y = static_cast<double>(msg->data[1]);
     const double z = static_cast<double>(msg->data[2]);
@@ -181,7 +200,7 @@ private:
       }
 
       std_msgs::msg::String out;
-      out.data = ok ? "pick_done" : "failed";
+      out.data = ok ? "pick_done" : "pick_failed";
       self->mani_cmd_pub_->publish(out);
       RCLCPP_INFO(self->get_logger(), "Published /mani_command: %s", out.data.c_str());
 
@@ -304,6 +323,11 @@ private:
     return p;
   }
 
+  geometry_msgs::msg::PoseStamped liftlow(geometry_msgs::msg::PoseStamped p)
+  {
+    p.pose.position.z += 0.05;
+    return p;
+  }
   geometry_msgs::msg::PoseStamped lift(geometry_msgs::msg::PoseStamped p)
   {
     p.pose.position.z += 0.17;
@@ -417,15 +441,19 @@ private:
     gripper("open");
 
     check_estop();
+    move_arm_via_service(liftlow(pregrasp(pick)));
+    rclcpp::sleep_for(std::chrono::milliseconds(200));
+
+    check_estop();
     move_arm_via_service(pregrasp(pick));
-    rclcpp::sleep_for(std::chrono::milliseconds(500));
+    rclcpp::sleep_for(std::chrono::milliseconds(200));
 
     check_estop();
     move_arm_via_service(pick);
 
     check_estop();
     gripper("close");
-    rclcpp::sleep_for(std::chrono::milliseconds(1000));
+    rclcpp::sleep_for(std::chrono::milliseconds(500));
 
     check_estop();
     move_arm_via_service(lift(pick));
@@ -449,21 +477,40 @@ private:
     check_estop();
     move_arm_via_service(lift(place));
 
+    check_estop();
+    publish_arm_idle();
+
     RCLCPP_INFO(get_logger(), "PLACE DONE");
   }
 
-  // void execute_pick(geometry_msgs::msg::PoseStamped pick)
-  // {
-  //   gripper("open");
-  //   move_arm_via_service(pick);
-  //   gripper("close");
-  // }
+  void publish_arm_idle()
+  {
+    std::array<double, 5> joint_deg{};
+    joint_deg = {0.0, -90.0, 90.0, 90.0, 0.0};
 
-  // void execute_place(geometry_msgs::msg::PoseStamped place)
-  // {
-  //   move_arm_via_service(place);
-  //   gripper("open");
-  // }
+    trajectory_msgs::msg::JointTrajectory traj;
+    traj.joint_names = {"joint1", "joint2", "joint3", "joint4", "joint5"};
+
+    trajectory_msgs::msg::JointTrajectoryPoint point;
+    point.positions = {
+      deg2rad(joint_deg[0]), 
+      deg2rad(joint_deg[1]), 
+      deg2rad(joint_deg[2]), 
+      deg2rad(joint_deg[3]), 
+      deg2rad(joint_deg[4])
+    };
+    point.time_from_start.sec = 2;
+    point.time_from_start.nanosec = 0;
+
+    traj.points.push_back(point);
+
+    arm_pub_->publish(traj);
+  }
+
+  double deg2rad(double deg)
+  {
+    return deg * M_PI / 180.0;
+  }
 
 private:
   rclcpp::Client<PoseToJointExecute>::SharedPtr pose_exec_client_;
@@ -474,6 +521,7 @@ private:
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr estop_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr resume_sub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mani_cmd_pub_;
+  rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr arm_pub_;
 
   std::atomic<bool> busy_{false};
   std::atomic<bool> estop_requested_{false};
