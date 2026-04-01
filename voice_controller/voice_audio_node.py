@@ -9,6 +9,7 @@ import os
 import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
+from pynput import keyboard as pynput_keyboard
 
 try:
     import winsound
@@ -19,7 +20,7 @@ except ImportError:
 # =========================
 # 네트워크 설정
 # =========================
-SERVER_HOST = "10.10.141.126"
+SERVER_HOST = "192.168.0.7"
 SERVER_PORT = 5000
 
 CLIENT_ID = "VOI"
@@ -81,11 +82,17 @@ WAKE_WORD_TOKENS = [
     "데뷔야",
     "LEMIAN",
     "뷰미아",
+    "래이미",
+    "뷔야",
+    "랩 뷰러",
 ]
 
 WAKE_CHECK_INTERVAL_SEC = 1.0
 WAKE_WINDOW_SEC = 1.2
 WAKE_COOLDOWN_SEC = 2.0
+
+# 스페이스바 수동 진입 쿨다운
+SPACE_TRIGGER_COOLDOWN_SEC = 0.7
 
 # 명령 녹음 관련
 COMMAND_MAX_SEC = 6.5
@@ -151,6 +158,9 @@ command_has_voice = False
 wake_last_detected_at = 0.0
 last_wake_check_at = 0.0
 last_rms_print_at = 0.0
+last_manual_trigger_at = 0.0
+
+error_retry_flag = False
 
 
 # =========================
@@ -206,6 +216,7 @@ PAYLOAD_AUDIO_MAP = {
     "pepper_move": ("pepper_move.wav", "MEDIUM"),
     "suger_move": ("suger_move.wav", "MEDIUM"),
     "sugar_move": ("suger_move.wav", "MEDIUM"),
+    "move_done": ("move_done.wav", "MEDIUM"),
 
     # 객체
     "knife_move": ("knife.wav", "MEDIUM"),
@@ -225,6 +236,8 @@ PAYLOAD_AUDIO_MAP = {
     "error_voice": ("error_voice.wav", "MEDIUM"),
     "error_comm": ("error_comm.wav", "HIGH"),
     "error_sensor": ("error_sensor.wav", "HIGH"),
+    "error_grip": ("error_grip.wav", "HIGH"),
+    "error_place": ("error_place.wav", "HIGH"),
     "error_safe_stop": ("error_safe_stop.wav", "CRITICAL"),
 }
 
@@ -449,9 +462,21 @@ def send_wire_message(target_id: str, payload: str):
 # 이벤트 처리
 # =========================
 def dispatch_event(event_code: str):
+    global error_retry_flag
     if event_code == "EV_UNKNOWN":
-        enqueue_audio_from_payload("error_voice")
+        if error_retry_flag:
+            enqueue_audio_from_payload("error_voice")
+            error_retry_flag = False
+        else:
+            threading.Thread(
+                target=play_payload_then_enter_command_listening,
+                args=("error_voice",),
+                daemon=True
+            ).start()
         return
+
+    if error_retry_flag:
+        error_retry_flag = False
 
     if event_code == "EV_START":
         enqueue_audio_from_payload("system_start")
@@ -485,22 +510,22 @@ def dispatch_event(event_code: str):
 
     if event_code == "EV_KNIFE":
         enqueue_audio_from_payload("knife_move")
-        send_wire_message(MAIN_TARGET_ID, "OBJ@KNIFE")
+        send_wire_message(MAIN_TARGET_ID, "TARGET@0")
         return
 
     if event_code == "EV_LADLE":
         enqueue_audio_from_payload("ladle_move")
-        send_wire_message(MAIN_TARGET_ID, "OBJ@LADLE")
+        send_wire_message(MAIN_TARGET_ID, "TARGET@2")
         return
 
     if event_code == "EV_FORK":
         enqueue_audio_from_payload("fork_move")
-        send_wire_message(MAIN_TARGET_ID, "OBJ@FORK")
+        send_wire_message(MAIN_TARGET_ID, "TARGET@1")
         return
 
     if event_code == "EV_PLATE":
         enqueue_audio_from_payload("plate_move")
-        send_wire_message(MAIN_TARGET_ID, "OBJ@PLATE")
+        send_wire_message(MAIN_TARGET_ID, "TARGET@3")
         return
 
     if event_code == "EV_CHECK_REQUEST":
@@ -508,13 +533,7 @@ def dispatch_event(event_code: str):
         return
 
     if event_code == "EV_CONFIRM_DONE":
-
-        try:
-            enqueue_audio_from_payload("return")
-        except Exception as e:
-            print(f"[피드백 재생 에러] {e}")
-
-        enter_command_listening()
+        enqueue_audio_from_payload("return")
         send_wire_message(WA_TARGET_ID, "tts2")
         return
 
@@ -563,6 +582,14 @@ def handle_server_message(line: str):
         payload = line[close_idx + 1:].strip()
 
         if not payload:
+            return
+
+        if sender == WA_TARGET_ID and payload == "wait_return":
+            threading.Thread(
+                target=play_payload_then_enter_command_listening,
+                args=("wait_return",),
+                daemon=True
+            ).start()
             return
 
         enqueue_audio_from_payload(payload)
@@ -701,6 +728,20 @@ def rms_level(x: np.ndarray) -> float:
 
 
 # =========================
+# 피드백 재생 후 명령 듣기 모드 진입
+# =========================
+def play_payload_then_enter_command_listening(payload: str):
+    try:
+        play_feedback_blocking(payload)
+    except Exception as e:
+        print(f"[피드백 재생 에러] {e}")
+    if payload == "error_voice":
+        global error_retry_flag
+        error_retry_flag = True
+    enter_command_listening()
+
+
+# =========================
 # 상태 전환
 # =========================
 def enter_command_listening():
@@ -748,6 +789,52 @@ def feedback_then_enter_command_listening():
         print(f"[피드백 재생 에러] {e}")
 
     enter_command_listening()
+
+
+# =========================
+# 스페이스바 수동 입력
+# =========================
+def trigger_manual_command_mode():
+    global last_manual_trigger_at, wake_last_detected_at
+
+    now = time.time()
+
+    if now - last_manual_trigger_at < SPACE_TRIGGER_COOLDOWN_SEC:
+        return
+
+    with audio_lock:
+        if is_audio_playing:
+            print("[수동입력] 오디오 재생 중이라 스페이스 입력 무시")
+            return
+
+    with state_lock:
+        current_state = listen_state
+        if current_state != "WAIT_WAKE":
+            print(f"[수동입력] 현재 상태={current_state} 이므로 스페이스 입력 무시")
+            return
+
+        last_manual_trigger_at = now
+        wake_last_detected_at = now   # 직후 호출어 중복 감지 방지
+
+    print("[수동입력] SPACE 입력 -> 호출 피드백 후 명령 입력 모드 시작")
+    enter_wake_feedback()
+    threading.Thread(target=feedback_then_enter_command_listening, daemon=True).start()
+
+
+def on_key_press(key):
+    try:
+        if key == pynput_keyboard.Key.space:
+            trigger_manual_command_mode()
+    except Exception as e:
+        print(f"[키보드 입력 에러] {e}")
+
+
+def start_keyboard_listener():
+    listener = pynput_keyboard.Listener(on_press=on_key_press)
+    listener.daemon = True
+    listener.start()
+    print("[키보드] 스페이스바 수동 입력 리스너 시작")
+    return listener
 
 
 # =========================
@@ -885,6 +972,8 @@ def main():
     connect_server()
     threading.Thread(target=recv_loop, daemon=True).start()
 
+    keyboard_listener = start_keyboard_listener()
+
     print("[1] Whisper 모델 로딩 시작...")
     model = WhisperModel(
         MODEL_SIZE,
@@ -898,6 +987,7 @@ def main():
     print("- 1초마다 호출어(예: 레미야)를 검사합니다")
     print("- 호출어 감지 시 '네, 말씀하세요' 피드백을 재생합니다")
     print("- 피드백 재생이 끝난 뒤 명령 입력 모드로 전환됩니다")
+    print("- 또는 스페이스바를 누르면 호출 피드백 후 명령 입력 모드로 전환됩니다")
     print("- 호출 후 최대 5초까지 사용자의 명령 시작을 기다립니다")
     print("- 말이 끝나고 1.2초 정도 조용하면 자동 인식합니다")
     print("- Ctrl+C 로 종료\n")
@@ -934,6 +1024,11 @@ def main():
             except Exception as e:
                 print(f"[에러] {e}")
                 time.sleep(0.2)
+
+    try:
+        keyboard_listener.stop()
+    except Exception:
+        pass
 
     try:
         if sock:
