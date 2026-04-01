@@ -19,16 +19,21 @@ import queue
 import socket
 import threading
 import re
+import math
+
+# YAW_DEG = 90    # 왼쪽 옆면이므로 90도
+# PITCH_DEG = 20  # 위에서 아래로 내려다보는 각도 (예: 30도)
 
 
 send_queue = queue.Queue()
-
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 yolo_model_path = os.path.join(current_dir, 'yolo11n-pose.pt')
 yolo_model = YOLO(yolo_model_path)
 # --- 상태 관리 변수 ---
 is_person_present = False # 사람이 있는지 없는지
+is_fire_on = False
+is_stove_check = False
 pending_zone = -1        # 현재 머물고 있는 새로운 구역
 last_sent_zone = -1       # 로봇에게 마지막으로 전송한 구역 
 zone_entry_time = 0     # 사람이 카메라에 잡힌 시간
@@ -39,7 +44,7 @@ scan_step = 0
 scan_timer = 0
 ABSENT_THRESHOLD = 3.0
 DIST_THRESHOLD = 0.02
-LOST_HAND_THRESHOLD = 150 # 30프레임(약 1초) 동안 손이 안 보이면 자리를 비운 것으로 간주
+LOST_HAND_THRESHOLD = 90 # 30프레임(약 1초) 동안 손이 안 보이면 자리를 비운 것으로 간주
 hand_unseen_counter = 0   # 손이 안 보인 프레임을 카운트하는 변수
 current_target_id = None
 aruco_sent = False
@@ -49,7 +54,7 @@ aruco_sent = False
 
 # ====== 소켓 ======
 #HOST = "127.0.0.1"
-HOST = "10.10.141.126" 
+HOST = "192.168.0.7" 
 PORT = 5000
 
 recvFlag = False
@@ -57,7 +62,7 @@ rsplit = []
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
 def gettingMsg(): 
-    global rsplit, recvFlag, TARGET, target_pixel, current_target_id, aruco_sent
+    global rsplit, recvFlag, TARGET, target_pixel, current_target_id, aruco_sent, is_fire_on
     
     while True: 
         # s(소켓)에 읽을 데이터가 있는지 딱 0.01초만 확인
@@ -92,6 +97,14 @@ def gettingMsg():
                         current_target_id = None
                         aruco_sent = False
                         print(f"ArUco 추적 중지")
+
+                    elif "FIRE" in rstr:
+                        if "ON" in rstr:
+                            is_fire_on = True
+                            print(f">> 스토브 ON,{is_fire_on}")
+                        elif "OFF" in rstr:
+                            is_fire_on = False
+                            print(">> 스토브 OFF")
 
                     if "TARGET@" in rstr:
                         match = re.search(r'TARGET@(\d+)', rstr)
@@ -239,6 +252,24 @@ def inside_allhand(hand_pixel,target_pixel,W,H,depth_frame,threshold_z=0.05):
     # 충돌 안 했을 때: (False, 관측된 최소 거리) 반환
     return False, min_dz
 
+# def get_corrected_coords(dx, dy, dz):
+#     # 라디안 변환
+#     yaw = math.radians(YAW_DEG)
+#     pitch = math.radians(PITCH_DEG)
+
+#     # 1. 먼저 상하 각도(Pitch) 보정
+#     # 내려다보고 있기 때문에 카메라의 y와 z를 섞어서 실제 높이(real_y)를 찾음
+#     # 카메라가 내려다볼 때 y축은 아래가 (+), z축은 정면이 (+)
+#     real_y = dy * math.cos(pitch) - dz * math.sin(pitch)
+#     temp_z = dy * math.sin(pitch) + dz * math.cos(pitch)
+
+#     # 2. 좌우 각도(Yaw) 보정 (90도 회전)
+#     # 이제 보정된 temp_z를 사용하여 사람 기준의 좌우(real_x)를 결정
+#     real_x = temp_z * math.sin(yaw)  # 90도일 때 사실상 real_x = temp_z
+#     real_z = dx                      # 카메라의 좌우가 사람의 앞뒤가 됨
+
+#     return real_x, real_y, real_z
+
 def detection_box(tools_dect, hand_dect, current_frame, depth_frame, intr):
     target_id = "[VI]"
     global prev_blade_pos
@@ -260,6 +291,7 @@ def detection_box(tools_dect, hand_dect, current_frame, depth_frame, intr):
 
     flag_Up = False; flag_Down = False; flag_Left = False; flag_Right = False
     
+
     if not hand_list:
         flag_blade=False
         flag_target=False
@@ -289,18 +321,44 @@ def detection_box(tools_dect, hand_dect, current_frame, depth_frame, intr):
             dy = t_point[1] - h_point[1]
             dz = t_point[2] - h_point[2]    
 
+            # abs_dx = abs(dx)
+            # abs_dy = abs(dy)
+            # abs_dz = abs(dz)
+
+            # # 만약 위로 올릴 때 dx는 커지고 dz는 작아진다면(혹은 그 반대)
+            # if abs_dx > DIST_THRESHOLD or abs_dz > DIST_THRESHOLD:
+            #     # dx와 dz 중 더 많이 변한 쪽을 우선 신뢰하거나, 두 조건의 조합으로 결정
+            #     # 카메라가 사선일 경우: dx와 dz의 부호를 조합합니다.
+            #     if dx > 0 and dz < 0: # 예시: 오른쪽 위로 올라가는 궤적
+            #         flag_Up = True
+            #     elif dx < 0 and dz > 0:
+            #         flag_Down = True
+
+            # # 3. 만약 dy가 좌우를 담당한다면
+            # if abs_dy > DIST_THRESHOLD or abs_dz >DIST_THRESHOLD:
+            #     if dy > 0 and dz > 0:
+            #         flag_Right = True
+            #     else:
+            #         flag_Left = True
             # 주의: 카메라는 90도 돌아가 있음
             cam_Up = (dz - dy) > DIST_THRESHOLD
             cam_Down = (dz - dy) < -DIST_THRESHOLD
             cam_Left = (dx + dz) < -DIST_THRESHOLD
             cam_Right = (dx + dz) > DIST_THRESHOLD
-
             # 2. 카메라 기준 방향을 "사람 기준 실제 방향"으로 변환합니다. (90도 회전 예시)
             # 여기서만 수정을 하면, 아래 로직은 건드릴 필요가 없습니다.
             flag_Right = cam_Up     # 카메라의 위쪽이 실제 나의 오른쪽일 때
             flag_Left  = cam_Down
             flag_Up    = cam_Left
             flag_Down  = cam_Right
+
+            # rx, ry, rz = get_corrected_coords(dx, dy, dz)
+
+            # # 방향 판정 (rx, ry 사용)
+            # flag_Right = rx > DIST_THRESHOLD
+            # flag_Left  = rx < -DIST_THRESHOLD
+            # flag_Up    = ry < -DIST_THRESHOLD  # 사람 기준 위쪽
+            # flag_Down  = ry > DIST_THRESHOLD   # 사람 기준 아래쪽
 
     flag_target, _= inside_allhand(hand_pixel,target_pixel,W,H,depth_frame,0.05)
     flag_blade, blade_dist = inside_allhand(hand_pixel,blade_pixel,W,H, depth_frame,0.05)
@@ -312,7 +370,7 @@ def detection_box(tools_dect, hand_dect, current_frame, depth_frame, intr):
         if flag_blade:
             if danger_start_time == 0:
                 danger_start_time = time.time() # 처음 감지된 시점 기록
-            
+         
             # 경과 시간 계산
             if (time.time() - danger_start_time) >= CONFIRM_TIME:
                 draw_text(annotated_image, "DANGER! ", WARNING_TXT_ORG, COLOR_RED)
@@ -597,7 +655,7 @@ def main():
     global current_state, last_sent_zone, pending_zone, zone_entry_time
     global recvFlag, rsplit, prev_led_msg 
     global scan_step,scan_timer,hand_unseen_counter
-    global current_target_id, aruco_sent
+    global current_target_id, aruco_sent, is_fire_on, is_stove_check
 
 
    # 최근 30프레임 평균
@@ -609,7 +667,7 @@ def main():
 
     tools_result = [] 
     hand_result = None
-    is_stove_on = False
+    
     last_person_seen_time = time.time()
     is_cooking = False
 
@@ -627,26 +685,18 @@ def main():
                     print(">> [SYSTEM] 조리시작! 시퀀스를 가동합니다.")
                     send_queue.put("[OMXA]MOVE@0\n")
                 elif "FINISH" in rsplit:
-                    is_cooking = False
-                    print(">> [SYSTEM] 조리 종료. 대기 모드로 전환합니다.")
-                    current_state = 0
-                    send_queue.put("[OMXA]MOVE@0\n")
+                    if is_fire_on:
+                        is_stove_check = True
+                        print(">> [SYSTEM] 조리 종료. 스토브 확인 진행.")
+                        current_state = 2
+                        send_queue.put(f"[OMXA]MOVE@2\n")
+                    else:
+                        is_cooking = False
+                        print(">> [SYSTEM] 조리 종료. 대기 모드로 전환합니다.")
+                        current_state = 0
+                        send_queue.put("[OMXA]MOVE@0\n")
                     
-                if "STOVE" in rsplit:
-                    print(f">>> [MAIN] recvFlag 감지됨! rsplit 데이터: {rsplit}")
-                    if "ON" in rsplit:
-                        is_stove_on = True
-                        print(f">> 스토브 ON,{is_stove_on}")
-                        if current_state == 0:
-                            current_state = 2
-                            send_queue.put(f"[OMXA]MOVE@2\n")
-                    elif "OFF" in rsplit:
-                        is_stove_on = False
-                        print(">> 스토브 OFF")
-                        scan_step = 0
                 recvFlag = 0
-
-
             
             
             # 조리 시작
@@ -747,7 +797,7 @@ def main():
                     corners, ids, _ = aruco_detector.detectMarkers(frame)
                     if ids is not None:
 
-                        
+
                         for i in range(len(ids)):
                             if int(ids[i][0]) == current_target_id:
                                 u = int(np.mean(corners[i][0][:, 0])) 
@@ -797,7 +847,7 @@ def main():
 
                     if hand_unseen_counter >= LOST_HAND_THRESHOLD:
                         hand_unseen_counter = 0 # 초기화
-                        if is_stove_on:
+                        if is_fire_on:
                             print(">> 도마 모드 중단: 스토브 ON -> 스토브 감시로 전환")
                             current_state = 2
                             send_queue.put(f"[OMXA]MOVE@2\n")
@@ -811,13 +861,13 @@ def main():
             
             
             # 2: 스토브 모드
-            elif current_state == 2:         
+            elif current_state == 2:
                 # 사람 감지 (YOLO 실행)
                 if fid % 5 == 0:
                     has_person, _, yolo_results = get_valid_person(frame, yolo_model)
-                    print(f"\n[DEBUG STOVE] is_stove_on: {is_stove_on} | has_person: {has_person} | scan_step: {scan_step}")
-                    
-                    # 사람 감지 시 
+                    print(f"\n[DEBUG STOVE] is_fire_on: {is_fire_on} | has_person: {has_person} | scan_step: {scan_step}")
+
+                    # 사람 감지 시
                     if has_person:
                         # 마지막 사람 포착 시각
                         last_person_seen_time = time.time()
@@ -839,9 +889,9 @@ def main():
                         absent_duration = time.time() - last_person_seen_time
 
                         if fid % 15 == 0:
-                            print(f"\n[DEBUG STOVE] is_stove_on: {is_stove_on} | has_person: {has_person} | scan_step: {scan_step}")
+                            print(f"\n[DEBUG STOVE] is_fire_on: {is_fire_on} | has_person: {has_person} | scan_step: {scan_step}")
                         if absent_duration > ABSENT_THRESHOLD:
-                            if is_stove_on:
+                            if is_fire_on:
                                 wait_time = time.time() - scan_timer
                                 # 스토브 켜져 있다면 순차 탐색 시작
                                 if scan_step == 0:
@@ -883,10 +933,16 @@ def main():
                                     if final_wait_time > 20:
                                         print(">>> 20초 경과 : 스토브 자동 차단 명령 전송")
                                         send_queue.put(f"[VOI]stove_warning\n")
-                                        send_queue.put(f"[STOVE]FIRE@OFF\n")
-                                        is_stove_on = False
+                                        is_fire_on = False
                                         scan_step = 4
-
+                                
+                                elif scan_step == 4:
+                                    if is_stove_check:
+                                        is_cooking = False
+                                    scan_step = 0
+                                    current_state = 0
+                                    last_sent_zone = 0
+                                    send_queue.put(f"[OMXA]MOVE@0\n")
                 
                             else:
                                 if fid % 15 == 0:
