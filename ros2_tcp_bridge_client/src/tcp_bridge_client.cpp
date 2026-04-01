@@ -31,7 +31,7 @@ public:
   {
     server_ip_ = this->declare_parameter<std::string>("server_ip", "127.0.0.1");
     server_port_ = this->declare_parameter<int>("server_port", 5000);
-    client_id_ = this->declare_parameter<std::string>("client_id", "OMXA");
+    client_id_ = this->declare_parameter<std::string>("client_id", "OMXB");
     password_ = this->declare_parameter<std::string>("password", "PASSWD");
     target_id_ = this->declare_parameter<std::string>("target_id", "LR");
     reconnect_period_ms_ = this->declare_parameter<int>("reconnect_period_ms", 2000);
@@ -70,11 +70,19 @@ private:
 
     if (msg->data == "pick_done")
     {
-      wire_msg = "[LR]PLACE";
+      wire_msg = "[LR]PLACE\n";
     }
     else if(msg->data == "place_done")
     {
-      wire_msg = "[VOI]PLACE";
+      wire_msg = "[VOI]move_done\n";
+    }
+    else if(msg->data == "pick_failed")
+    {
+      wire_msg = "[VOI]error_grip\n";
+    }
+    else if(msg->data == "place_failed")
+    {
+      wire_msg = "[VOI]error_place\n";
     }
     else
     {
